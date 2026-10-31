@@ -51,7 +51,7 @@ export function buildFrame(a: Arena, playerColor = '#7a2cff'): RenderFrame {
   const pdef = p.state === 'attack' && p.attackKind ? PLAYER_ATTACKS[p.attackKind] : null;
   let pslash: { x: number; w: number; on: number } | null = null;
   if (pdef) {
-    const b = attackHitbox(p, pdef);
+    const b = attackHitbox(p, { ...pdef, reach: pdef.reach * a.perks.reach });
     if (b) pslash = { x: b.x, w: b.w, on: 0.8 };
   } else if (p.state === 'special' && p.t < 0.3) {
     pslash = { x: p.x - SPECIAL.radius, w: SPECIAL.radius * 2, on: 0.35 };

@@ -3,7 +3,7 @@ import {
   ENEMY_HURT_TIME, ENERGY_GAIN, ENERGY_ON_BLOCK, FIGHTER_H, FIGHTER_W, FIXED_DT, FX_TIME, GRAVITY,
   GROUND_Y, HITSTOP, HURT_TIME, ICE_GRIP, JUMP_VELOCITY, MAX_ENEMIES, MAX_ENERGY, MAX_EVENTS,
   MAX_PROJECTILES, MOVE_SPEED, PLAYER_MAX_HP, PROJECTILE_H, PROJECTILE_W, PROJECTILE_Y, ROAR_TIME,
-  SPECIAL, SPECIAL_COST, WAVE_DELAY, WORLD_W,
+  SPECIAL, SPECIAL_COST, WAVE_DELAY, WORLD_W,DODGE_COOLDOWN,
 } from './constants';
 import {
   PLAYER_ATTACKS, applyHit, attackDuration, attackHitbox, comboMultiplier, createFighter,
@@ -20,6 +20,7 @@ import {
   Arena, AttackKind, BossState, Enemy, EnemyKind, EnemyScaling, Fighter, FighterState, GameEvent,
   Hazard, HitResult, Input, Stats,
 } from './types';
+import { NO_PERKS, Perks, specialCostFor } from './perks';
 
 export interface ArenaSpec {
   waves: EnemyKind[][];
@@ -30,6 +31,7 @@ export interface ArenaSpec {
   world?: number;      // enables per-world boss scripting (1..5)
   miniBoss?: boolean;
   particles?: { style: AmbientStyle; ambient: number; impactCap: number; perHit: number };
+  perks?: Perks;
 }
 
 export function emptyInput(): Input {
@@ -55,7 +57,7 @@ export function createArena(
 ): Arena {
   const fx = spec.particles;
   const a: Arena = {
-    player: createFighter(200, 1, PLAYER_MAX_HP),
+    player: createFighter(200, 1, PLAYER_MAX_HP + (spec.perks?.maxHp ?? 0)),
     enemies: [], projectiles: [],
     hazards: (spec.hazards ?? []).map((h) => ({ ...h })),
     scaling: spec.scaling ?? NO_SCALING,
@@ -69,6 +71,8 @@ export function createArena(
     world: spec.world ?? 0, miniBoss: spec.miniBoss ?? false,
     particles: createParticles(fx?.style ?? 'motes', fx?.ambient ?? 0, fx?.impactCap ?? 0, fx?.perHit ?? 0),
     events: [],
+    perks: spec.perks ?? NO_PERKS,
+    dodgeCd: 0,
   };
   if (spec.tutorial) {
     a.enemies = [createEnemy('melee', 620, 0, 500)]; // training dummy with lots of HP
@@ -127,6 +131,7 @@ function updatePlayer(a: Arena, input: Input, dt: number): void {
   const p = a.player; const buf = a.buffer;
   p.t += dt;
   p.invuln = Math.max(0, p.invuln - dt);
+  a.dodgeCd = Math.max(0, a.dodgeCd - dt);
   if (p.state === 'dead') { integrate(p, dt); return; }
 
   const grounded = p.y >= GROUND_Y;
@@ -140,14 +145,15 @@ function updatePlayer(a: Arena, input: Input, dt: number): void {
   const free = p.state === 'idle' || p.state === 'walk' || p.state === 'block';
   const x0 = p.x;
 
-  if ((free || recovering) && buf.dodge > 0 && grounded) {
+  if ((free || recovering) && buf.dodge > 0 && grounded && a.dodgeCd <= 0) {
     buf.dodge = 0;
-    p.state = 'dodge'; p.attackKind = null; p.t = 0; p.invuln = DODGE_TIME;
+    a.dodgeCd = DODGE_COOLDOWN;
+    p.state = 'dodge'; p.attackKind = null; p.t = 0; p.invuln = DODGE_TIME + a.perks.dodgeInvuln;
     p.vx = (dir || -toEnemy) * DODGE_SPEED;
     emit(a, 'dodge');
     if (a.enemies.some((e) => e.state === 'telegraph' || e.state === 'attack')) a.stats.dodges += 1;
-  } else if ((free || canCancel) && buf.special > 0 && a.energy >= SPECIAL_COST) {
-    buf.special = 0; a.energy -= SPECIAL_COST; a.stats.specials += 1;
+  } else if ((free || canCancel) && buf.special > 0 && a.energy >= specialCostFor(a.perks)) {
+    buf.special = 0; a.energy -= specialCostFor(a.perks); a.stats.specials += 1;
     p.state = 'special'; p.attackKind = null; p.t = 0; p.hitLanded = false;
     p.invuln = SPECIAL.duration; p.vx = 0; p.facing = toEnemy;
     emit(a, 'special');
@@ -161,7 +167,7 @@ function updatePlayer(a: Arena, input: Input, dt: number): void {
     if (input.block && grounded) {
       p.state = 'block'; p.facing = toEnemy; p.vx = 0;
     } else {
-      const want = dir * MOVE_SPEED;
+      const want = dir * MOVE_SPEED * a.perks.moveSpeed;
       if (grounded && isOnIce(a.hazards, p.x)) p.vx += (want - p.vx) * Math.min(1, ICE_GRIP * dt);
       else p.vx = want;
       if (dir) p.facing = dir > 0 ? 1 : -1;
@@ -361,7 +367,7 @@ function onEnemyHit(a: Arena, e: Enemy, r: HitResult, kind: AttackKind | 'specia
   a.stats.maxCombo = Math.max(a.stats.maxCombo, a.combo.count);
   if (kind === 'heavy') a.stats.heavyHits += 1;
   if (kind === 'light3') a.stats.chain3 += 1;
-  a.energy = Math.min(MAX_ENERGY, a.energy + ENERGY_GAIN[kind]);
+  a.energy = Math.min(MAX_ENERGY, a.energy + ENERGY_GAIN[kind] * a.perks.energyGain);
   const big = kind === 'special' || kind === 'heavy';
   const shakeBy = kind === 'special' ? 10 : kind === 'heavy' ? 6 : kind === 'light3' ? 5 : 3;
   a.shake = Math.max(a.shake, shakeBy);
@@ -380,7 +386,9 @@ function updateProjectiles(a: Arena, dt: number): void {
     if (pr.x < -20 || pr.x > WORLD_W + 20) { pr.alive = false; anyDead = true; continue; }
     const box = { x: pr.x - PROJECTILE_W / 2, y: pr.y - PROJECTILE_H / 2, w: PROJECTILE_W, h: PROJECTILE_H };
     if (!rectsOverlap(box, hurtbox(p))) continue;
-    const r = applyHit(p, p.x - Math.sign(pr.vx), pr.damage, pr.knockback);
+    const r = applyHit(p, p.x - Math.sign(pr.vx), pr.damage, pr.knockback, {
+      blockReduction: a.perks.blockReduction, damageMul: a.perks.damageTaken,
+    });
     if (r !== 'ignored') { pr.alive = false; anyDead = true; onPlayerHit(a, r); }
   }
   if (anyDead) a.projectiles = a.projectiles.filter((pr) => pr.alive);
@@ -393,7 +401,7 @@ function updateHazards(a: Arena): void {
   for (const h of a.hazards) {
     if (h.kind === 'ice' || hazardPhase(h, a.time) !== 2) continue;
     if (!rectsOverlap(hazardBox(h), hurtbox(p))) continue;
-    onPlayerHit(a, applyHit(p, h.x + h.w / 2, h.damage, 160, { unblockable: true }));
+    onPlayerHit(a, applyHit(p, h.x + h.w / 2, h.damage, 160, { unblockable: true, damageMul: a.perks.damageTaken }));
   }
 }
 
@@ -401,14 +409,15 @@ function resolveHits(a: Arena): void {
   const p = a.player;
 
   if (p.state === 'attack' && p.attackKind) {
-    const def = PLAYER_ATTACKS[p.attackKind];
+    const base = PLAYER_ATTACKS[p.attackKind];
+    const def = a.perks.reach === 1 ? base : { ...base, reach: base.reach * a.perks.reach };
     const box = attackHitbox(p, def);
     if (box) {
       for (const e of a.enemies) {
         if (e.state === 'dead' || e.hitBySwing === a.swing) continue;
         if (!rectsOverlap(box, hurtbox(e))) continue;
         e.hitBySwing = a.swing;
-        const dmg = def.damage * comboMultiplier(a.combo.count);
+        const dmg = def.damage * a.perks.damage * comboMultiplier(a.combo.count);
         const r = applyHit(e, p.x, dmg, def.knockback, {
           armored: defOf(e).armored, invuln: ENEMY_HIT_INVULN,
         });
@@ -423,7 +432,7 @@ function resolveHits(a: Arena): void {
     a.shake = Math.max(a.shake, 10);
     for (const e of a.enemies) {
       if (e.state === 'dead' || Math.abs(e.x - p.x) > SPECIAL.radius) continue;
-      const dmg = SPECIAL.damage * comboMultiplier(a.combo.count);
+      const dmg = SPECIAL.damage * a.perks.specialDamage * comboMultiplier(a.combo.count);
       const r = applyHit(e, p.x, dmg, SPECIAL.knockback, {
         armored: defOf(e).armored, unblockable: true, invuln: ENEMY_HIT_INVULN,
       });
@@ -437,7 +446,9 @@ function resolveHits(a: Arena): void {
     const box = attackHitbox(e, enemyAttackDef(d));
     if (box && rectsOverlap(box, hurtbox(p))) {
       e.hitLanded = true;
-      onPlayerHit(a, applyHit(p, e.x, enemyDamage(e, d), d.knockback));
+      onPlayerHit(a, applyHit(p, e.x, enemyDamage(e, d), d.knockback, {
+        blockReduction: a.perks.blockReduction, damageMul: a.perks.damageTaken,
+      }));
     }
   }
 }

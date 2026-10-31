@@ -9,6 +9,9 @@ import { CharacterSkin, ItemKind, RARITY_COLOR, WeaponSkin } from '../cosmetics/
 import { PurchaseFailure, equippedId, itemState, totalStars } from '../economy/shop';
 import { CharacterArt, WeaponArt } from '../components/FighterArt';
 import { FIGHTER_H, FIGHTER_W } from '../engine/constants';
+import { MenuButton } from '../ui/MenuButton';
+import { Panel } from '../ui/Panel';
+import { COLORS } from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Characters' | 'Weapons'>;
 
@@ -65,8 +68,13 @@ export default function ShopScreen({ navigation, route }: Props) {
   return (
     <View style={styles.root}>
       <View style={styles.header}>
-        <Pressable onPress={() => navigation.goBack()}><Text style={styles.back}>◀ BACK</Text></Pressable>
-        <Text style={styles.title}>{kind === 'character' ? 'CHARACTERS' : 'WEAPONS'}</Text>
+        <MenuButton label="BACK" icon="back" compact onPress={() => navigation.goBack()} />
+        <View style={styles.tabs}>
+          <MenuButton label="CHARACTERS" compact variant={kind === 'character' ? 'primary' : 'default'}
+            onPress={() => { if (kind !== 'character') navigation.replace('Characters'); }} />
+          <MenuButton label="WEAPONS" compact variant={kind === 'weapon' ? 'primary' : 'default'}
+            onPress={() => { if (kind !== 'weapon') navigation.replace('Weapons'); }} />
+        </View>
         <Text style={styles.coins}>★ {stars}   ● {save.coins}</Text>
       </View>
 
@@ -93,62 +101,50 @@ export default function ShopScreen({ navigation, route }: Props) {
           )}
         />
 
-        <ScrollView style={styles.panel} contentContainerStyle={styles.panelInner}>
-          {/* PLACEHOLDER ART preview: the same shapes used in combat */}
-          <Canvas style={styles.preview}>
-            <Rect x={0} y={0} width={190} height={150} color="#14122a" />
-            <Rect x={0} y={128} width={190} height={22} color="#1c1838" />
-            <Group transform={[{ translateX: 62 }, { translateY: 128 }, { scale: 1.25 }]}>
-              <CharacterArt look={charSkin.visual} color={charSkin.visual.body} />
-              <Group transform={[{ translateX: FIGHTER_W / 2 - 6 }, { translateY: -FIGHTER_H * 0.62 }, { rotate: -0.35 }]}>
-                <WeaponArt weapon={weaponSkin.visual} />
+        <Panel style={styles.panel}>
+          <ScrollView contentContainerStyle={styles.panelInner}>
+            {/* PLACEHOLDER ART preview: the same shapes used in combat */}
+            <Canvas style={styles.preview}>
+              <Rect x={0} y={0} width={190} height={150} color="#14122a" />
+              <Rect x={0} y={128} width={190} height={22} color="#1c1838" />
+              <Group transform={[{ translateX: 62 }, { translateY: 128 }, { scale: 1.25 }]}>
+                <CharacterArt look={charSkin.visual} color={charSkin.visual.body} />
+                <Group transform={[{ translateX: FIGHTER_W / 2 - 6 }, { translateY: -FIGHTER_H * 0.62 }, { rotate: -0.35 }]}>
+                  <WeaponArt weapon={weaponSkin.visual} />
+                </Group>
               </Group>
-            </Group>
-          </Canvas>
+            </Canvas>
 
-          <Text style={styles.pName}>{selected.name}</Text>
-          <Text style={[styles.pRarity, { color: RARITY_COLOR[selected.rarity] }]}>{selected.rarity.toUpperCase()}</Text>
-          <Text style={styles.pBlurb}>{selected.blurb}</Text>
-          {kind === 'weapon' && (
-            <Text style={styles.pBlurb}>Hit effect: {weaponSkin.visual.hitFx} · cosmetic only</Text>
-          )}
-          {kind === 'character' && <Text style={styles.pBlurb}>Cosmetic only: no gameplay change.</Text>}
+            <Text style={styles.pName}>{selected.name}</Text>
+            <Text style={[styles.pRarity, { color: RARITY_COLOR[selected.rarity] }]}>{selected.rarity.toUpperCase()}</Text>
+            <Text style={styles.pBlurb}>{selected.blurb}</Text>
+            {kind === 'weapon' && <Text style={styles.pBlurb}>Hit effect: {weaponSkin.visual.hitFx} · cosmetic only</Text>}
+            {kind === 'character' && <Text style={styles.pBlurb}>Cosmetic only: no gameplay change.</Text>}
 
-          {state === 'equipped' && <View style={[styles.btn, styles.btnOff]}><Text style={styles.btnTxt}>EQUIPPED</Text></View>}
-          {state === 'owned' && (
-            <Pressable style={styles.btn} onPress={doEquip}><Text style={styles.btnTxt}>EQUIP</Text></Pressable>
-          )}
-          {state === 'locked' && (
-            <Text style={styles.lock}>🔒 Needs {gate}★ in total (you have {stars}★)</Text>
-          )}
-          {state === 'buyable' && (
-            save.coins >= price ? (
-              <Pressable style={styles.btn} onPress={openConfirm}>
-                <Text style={styles.btnTxt}>BUY ● {price}</Text>
-              </Pressable>
-            ) : (
-              <View style={[styles.btn, styles.btnOff]}>
-                <Text style={styles.btnTxt}>NEED {price - save.coins} MORE ●</Text>
-              </View>
-            )
-          )}
-          {!!message && <Text style={styles.msg}>{message}</Text>}
-        </ScrollView>
+            <View style={styles.action}>
+              {state === 'equipped' && <MenuButton label="EQUIPPED" icon="check" compact onPress={() => {}} />}
+              {state === 'owned' && <MenuButton label="EQUIP" variant="primary" compact onPress={doEquip} />}
+              {state === 'locked' && <Text style={styles.lock}>🔒 Needs {gate}★ in total (you have {stars}★)</Text>}
+              {state === 'buyable' && (save.coins >= price
+                ? <MenuButton label={`BUY ● ${price}`} variant="primary" compact onPress={openConfirm} />
+                : <MenuButton label={`NEED ${price - save.coins} MORE ●`} compact onPress={() => {}} />)}
+            </View>
+            {!!message && <Text style={styles.msg}>{message}</Text>}
+          </ScrollView>
+        </Panel>
       </View>
 
       <Modal transparent visible={confirm} animationType="fade" onRequestClose={() => setConfirm(false)}>
         <View style={styles.overlay}>
-          <View style={styles.dialog}>
+          <Panel style={styles.dialog}>
             <Text style={styles.dTitle}>Buy {selected.name}?</Text>
             <Text style={styles.dLine}>Cost ● {price}</Text>
             <Text style={styles.dLine}>Balance after: ● {Math.max(0, save.coins - price)}</Text>
             <View style={styles.dRow}>
-              <Pressable style={[styles.btn, styles.dBtn]} onPress={doPurchase}><Text style={styles.btnTxt}>CONFIRM</Text></Pressable>
-              <Pressable style={[styles.btn, styles.dBtn, styles.btnOff]} onPress={() => setConfirm(false)}>
-                <Text style={styles.btnTxt}>CANCEL</Text>
-              </Pressable>
+              <MenuButton label="CONFIRM" variant="primary" compact onPress={doPurchase} />
+              <MenuButton label="CANCEL" compact onPress={() => setConfirm(false)} />
             </View>
-          </View>
+          </Panel>
         </View>
       </Modal>
     </View>
@@ -156,33 +152,29 @@ export default function ShopScreen({ navigation, route }: Props) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0a0a14', paddingTop: 8 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 6 },
-  back: { color: '#bfa3ff', fontWeight: '800' },
-  title: { color: '#fff', fontWeight: '900', fontSize: 20, letterSpacing: 5 },
-  coins: { color: '#ffd24a', fontWeight: '800' },
+  root: { flex: 1, backgroundColor: COLORS.bg, paddingTop: 8 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 6 },
+  tabs: { flexDirection: 'row', gap: 6 },
+  coins: { color: COLORS.gold, fontWeight: '800' },
   body: { flex: 1, flexDirection: 'row', paddingHorizontal: 12, gap: 12 },
   grid: { flex: 1 },
-  card: { width: 104, margin: 4, padding: 6, borderRadius: 8, borderWidth: 2, backgroundColor: '#15152a', alignItems: 'center', gap: 3 },
-  cardSelected: { backgroundColor: '#2a2050' },
+  card: { width: 104, margin: 4, padding: 6, borderRadius: 8, borderWidth: 2, backgroundColor: '#12121b', alignItems: 'center', gap: 3 },
+  cardSelected: { backgroundColor: '#2a2236', borderColor: COLORS.gold },
   swatch: { width: 30, height: 30, borderRadius: 15 },
-  cardName: { color: '#fff', fontSize: 10, fontWeight: '700' },
-  cardBadge: { color: '#ffd24a', fontSize: 10, fontWeight: '800' },
-  panel: { width: 230, backgroundColor: 'rgba(0,0,0,0.45)', borderRadius: 10, marginBottom: 8 },
+  cardName: { color: COLORS.text, fontSize: 10, fontWeight: '700' },
+  cardBadge: { color: COLORS.gold, fontSize: 10, fontWeight: '800' },
+  panel: { width: 230, marginBottom: 8, padding: 0 },
   panelInner: { padding: 10, gap: 4, alignItems: 'center' },
   preview: { width: 190, height: 150, borderRadius: 6 },
-  pName: { color: '#fff', fontWeight: '900', fontSize: 16 },
+  pName: { color: COLORS.text, fontWeight: '900', fontSize: 16 },
   pRarity: { fontWeight: '800', fontSize: 11, letterSpacing: 2 },
   pBlurb: { color: '#cfd0e6', fontSize: 11, textAlign: 'center' },
-  btn: { marginTop: 6, backgroundColor: '#7a2cff', paddingVertical: 8, paddingHorizontal: 22, borderRadius: 8, alignItems: 'center' },
-  btnOff: { backgroundColor: '#3a3a4d' },
-  btnTxt: { color: '#fff', fontWeight: '800', letterSpacing: 2, fontSize: 12 },
-  lock: { color: '#c77', fontWeight: '700', fontSize: 11, marginTop: 6, textAlign: 'center' },
+  action: { marginTop: 6 },
+  lock: { color: '#c77', fontWeight: '700', fontSize: 11, textAlign: 'center' },
   msg: { color: '#9fe8a8', fontWeight: '700', fontSize: 11, marginTop: 4, textAlign: 'center' },
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center' },
-  dialog: { backgroundColor: '#1a1a2e', borderRadius: 12, padding: 18, gap: 4, alignItems: 'center', minWidth: 280 },
-  dTitle: { color: '#fff', fontWeight: '900', fontSize: 18 },
-  dLine: { color: '#ffd24a', fontWeight: '700' },
-  dRow: { flexDirection: 'row', gap: 10, marginTop: 6 },
-  dBtn: { paddingHorizontal: 18 },
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.75)', alignItems: 'center', justifyContent: 'center' },
+  dialog: { gap: 4, alignItems: 'center', minWidth: 280 },
+  dTitle: { color: COLORS.text, fontWeight: '900', fontSize: 18 },
+  dLine: { color: COLORS.gold, fontWeight: '700' },
+  dRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
 });

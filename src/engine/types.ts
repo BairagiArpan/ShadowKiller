@@ -1,5 +1,6 @@
 import type { EnemyDef } from './enemies';
 import type { ParticleSystem } from './particles';
+import type { Perks } from './perks';
 
 export type GameEvent =
   | 'hit_light' | 'hit_heavy' | 'blocked' | 'dodge' | 'special' | 'hurt'
@@ -109,6 +110,9 @@ export interface Arena {
   world: number;              // 0 = no boss scripting
   miniBoss: boolean;
   particles: ParticleSystem;  // visual only
-  events: GameEvent[];        // audio events; the screen drains this every frame
+  events: GameEvent[];
+  perks: Perks;
+  dodgeCd: number;            // seconds until the player may dodge again               // skill bonuses (NO_PERKS when none)        // audio events; the screen drains this every frame
   rng: () => number;
+  
 }

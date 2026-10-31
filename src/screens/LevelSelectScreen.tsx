@@ -10,6 +10,9 @@ import { getWorldLevels } from '../levels';
 import { isLevelUnlocked, nextPlayable } from '../levels/progress';
 import { REWARDS } from '../economy/economy.config';
 import { WORLDS } from '../levels/worlds';
+import { MenuButton } from '../ui/MenuButton';
+import { Panel } from '../ui/Panel';
+import { COLORS } from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Levels'>;
 
@@ -40,7 +43,7 @@ export default function LevelSelectScreen({ navigation, route }: Props) {
   return (
     <View style={[styles.root, { backgroundColor: wd.palette.sky }]}>
       <View style={styles.header}>
-        <Pressable onPress={() => navigation.goBack()}><Text style={styles.back}>◀ WORLDS</Text></Pressable>
+        <MenuButton label="WORLDS" icon="back" compact onPress={() => navigation.goBack()} />
         <Text style={[styles.title, { color: wd.palette.accent }]}>{wd.name.toUpperCase()}</Text>
         <Text style={styles.coins}>★ {starsInWorld(save, world)}/300   ● {save.coins}</Text>
       </View>
@@ -57,13 +60,15 @@ export default function LevelSelectScreen({ navigation, route }: Props) {
           renderItem={({ item }) => {
             const r = save.levels[levelId(world, item)];
             const open = isLevelUnlocked(save, world, item);
+            const isSel = selected === item;
             return (
               <Pressable
                 onPress={() => setSelected(item)}
                 style={[
                   styles.cell,
-                  { backgroundColor: !open ? '#15151f' : r?.completed ? wd.palette.ground : '#2a2a40' },
-                  selected === item && { borderColor: wd.palette.accent, borderWidth: 2 },
+                  { backgroundColor: !open ? '#12121b' : r?.completed ? wd.palette.ground : '#1d1d2e' },
+                  { borderColor: isSel ? COLORS.gold : r?.stars === 3 ? '#8a6a1c' : '#2a2a3d' },
+                  isSel && styles.cellSel,
                 ]}
               >
                 <Text style={[styles.cellNum, !open && { color: '#555' }]}>{open ? item : '🔒'}</Text>
@@ -73,35 +78,34 @@ export default function LevelSelectScreen({ navigation, route }: Props) {
           }}
         />
 
-        <View style={styles.panel}>
+        <Panel style={styles.panel}>
           <Text style={styles.pTitle}>Level {selected}</Text>
-          <Text style={[styles.pTier, { color: wd.palette.accent }]}>
+          <Text style={styles.pTier}>
             {tierLabel(cfg.tier)}{cfg.worldBoss ? ' · WORLD BOSS' : cfg.miniBoss ? ' · MINI-BOSS' : ''}
           </Text>
           <Text style={styles.pLine}>{cfg.waves.length} waves · {enemyCount} enemies</Text>
           <Text style={styles.pLine}>{enemyNames}</Text>
           <Text style={styles.pLine}>Hazards: {hazardNames}</Text>
-          <Text style={styles.pLine}>★ {cfg.objective.label}</Text>
+          <Text style={styles.pGold}>★ {cfg.objective.label}</Text>
           <Text style={styles.pLine}>Reward: {cfg.baseReward} ●{rec?.completed ? ' (first clear claimed)' : ''}</Text>
           {rec?.completed && <Text style={styles.pLine}>Best {rec.bestScore} · {stars(rec.stars)}</Text>}
 
-          {unlocked ? (
-            <>
-              <Pressable style={[styles.btn, { backgroundColor: wd.palette.accent }]} onPress={() => play(false)}>
-                <Text style={styles.btnTxt}>{rec?.completed ? 'REPLAY' : 'PLAY'}</Text>
-              </Pressable>
-              {rec?.completed && (
-                <Pressable style={[styles.btn, styles.challenge]} onPress={() => play(true)}>
-                  <Text style={styles.btnTxt}>
-                    CHALLENGE {rec.challengeClears === 0 ? `+${Math.round(cfg.baseReward * REWARDS.challengeFirstMultiplier)}●` : ''}
-                  </Text>
-                </Pressable>
-              )}
-            </>
-          ) : (
-            <Text style={styles.locked}>🔒 Locked. Clear the previous level first.</Text>
-          )}
-        </View>
+          <View style={styles.actions}>
+            {unlocked ? (
+              <>
+                <MenuButton label={rec?.completed ? 'REPLAY' : 'PLAY'} variant="primary" icon="play" onPress={() => play(false)} />
+                {rec?.completed && (
+                  <MenuButton
+                    label={`CHALLENGE${rec.challengeClears === 0 ? ` +${Math.round(cfg.baseReward * REWARDS.challengeFirstMultiplier)}●` : ''}`}
+                    variant="danger" compact onPress={() => play(true)}
+                  />
+                )}
+              </>
+            ) : (
+              <Text style={styles.locked}>🔒 Locked. Clear the previous level first.</Text>
+            )}
+          </View>
+        </Panel>
       </View>
     </View>
   );
@@ -110,20 +114,19 @@ export default function LevelSelectScreen({ navigation, route }: Props) {
 const styles = StyleSheet.create({
   root: { flex: 1, paddingTop: 8 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 6 },
-  back: { color: '#bfa3ff', fontWeight: '800' },
-  title: { fontWeight: '900', fontSize: 18, letterSpacing: 4 },
-  coins: { color: '#ffd24a', fontWeight: '800' },
+  title: { fontWeight: '900', fontSize: 18, letterSpacing: 5 },
+  coins: { color: COLORS.gold, fontWeight: '800' },
   body: { flex: 1, flexDirection: 'row', paddingHorizontal: 12, gap: 12 },
   grid: { flex: 1 },
-  cell: { width: 46, height: 46, margin: 4, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
-  cellNum: { color: '#fff', fontWeight: '800', fontSize: 14 },
-  cellStars: { color: '#ffd24a', fontSize: 8, letterSpacing: 1 },
-  panel: { width: 240, backgroundColor: 'rgba(0,0,0,0.45)', borderRadius: 10, padding: 12, gap: 4, marginBottom: 8 },
-  pTitle: { color: '#fff', fontWeight: '900', fontSize: 18 },
-  pTier: { fontWeight: '800', fontSize: 11, letterSpacing: 2 },
+  cell: { width: 46, height: 46, margin: 4, borderRadius: 8, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
+  cellSel: { borderWidth: 2.5 },
+  cellNum: { color: COLORS.text, fontWeight: '800', fontSize: 14 },
+  cellStars: { color: COLORS.gold, fontSize: 8, letterSpacing: 1 },
+  panel: { width: 250, gap: 3, marginBottom: 8, backgroundColor: 'rgba(7,7,13,0.85)' },
+  pTitle: { color: COLORS.text, fontWeight: '900', fontSize: 18 },
+  pTier: { color: COLORS.gold, fontWeight: '800', fontSize: 11, letterSpacing: 2 },
   pLine: { color: '#cfd0e6', fontSize: 11 },
-  btn: { marginTop: 8, paddingVertical: 8, borderRadius: 8, alignItems: 'center' },
-  challenge: { backgroundColor: '#a8261b', marginTop: 4 },
-  btnTxt: { color: '#fff', fontWeight: '800', letterSpacing: 2 },
-  locked: { color: '#c77', marginTop: 8, fontWeight: '700' },
+  pGold: { color: COLORS.goldLight, fontSize: 11, fontWeight: '700' },
+  actions: { marginTop: 8, gap: 6 },
+  locked: { color: '#c77', fontWeight: '700' },
 });

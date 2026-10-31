@@ -44,3 +44,17 @@ export const SHOP = {
     weapon:    { common: 0, rare: 0, epic: 0,  legendary: 0 },
   } as Record<ItemKind, Record<Rarity, number>>,
 };
+
+/** Editable daily-reward values. Day 7 of each 7-day cycle is the big one. */
+export const DAILY = {
+  rewards: [15, 20, 30, 40, 50, 60, 120],
+  cooldownMs: 20 * 3600_000,      // time between claims
+  streakBreakMs: 44 * 3600_000,   // claim later than this and the streak restarts
+  clockToleranceMs: 10 * 60_000,  // small backwards clock changes (network time sync) are allowed
+  observeStepMs: 60_000,          // the "latest time seen" is only re-saved when it advances this much
+};
+
+/** One-time coin reward for claiming an achievement, by tier. */
+export const ACHIEVEMENT_REWARDS: Record<'bronze' | 'silver' | 'gold' | 'platinum', number> = {
+  bronze: 25, silver: 60, gold: 150, platinum: 300,
+};

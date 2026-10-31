@@ -30,3 +30,6 @@ const styles = StyleSheet.create({
     textShadowColor: '#7a2cff', textShadowRadius: 24, textShadowOffset: { width: 0, height: 0 },
   },
 });
+
+
+

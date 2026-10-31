@@ -1,0 +1,1681 @@
+SHADOW KILLER GRAPHICS REVIEW
+
+
+========== package.json ==========
+{
+  "scripts": {
+    "test": "jest",
+    "gen:audio": "node tools/generate-audio.js",
+    "gen:icons": "node tools/generate-icons.js",
+    "gen:assets": "node tools/generate-audio.js && node tools/generate-icons.js",
+    "check:release": "node tools/check-release.js"
+  },
+  "jest": {
+    "preset": "jest-expo"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-navigation/native": "^7.5.0",
+    "@react-navigation/native-stack": "^7.20.0",
+    "@shopify/react-native-skia": "2.14.0",
+    "@types/react": "~19.2.4",
+    "expo": "^58.0.19",
+    "expo-asset": "~58.0.18",
+    "expo-audio": "~58.0.10",
+    "expo-constants": "~58.0.13",
+    "expo-modules-core": "~58.0.26",
+    "expo-screen-orientation": "~58.0.3",
+    "expo-splash-screen": "~58.0.11",
+    "expo-status-bar": "~58.0.4",
+    "react": "19.3.0",
+    "react-native": "0.88.0",
+    "react-native-reanimated": "4.7.1",
+    "react-native-safe-area-context": "~5.10.1",
+    "react-native-screens": "~4.30.0",
+    "react-native-worklets": "0.13.0",
+    "typescript": "~6.0.3"
+  },
+  "devDependencies": {
+    "@jest/globals": "^30.5.2",
+    "@types/jest": "30.0.0",
+    "@types/react": "~19.3.0",
+    "jest": "~30.5.2",
+    "jest-expo": "~58.0.12",
+    "ts-jest": "^29.4.14",
+    "typescript": "~6.0.3"
+  }
+}
+
+
+========== app.json ==========
+{
+  "expo": {
+    "name": "Shadow Killer",
+    "slug": "shadow-killer",
+    "version": "1.0.0",
+    "orientation": "landscape",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#05050a",
+    "android": {
+      "package": "com.shadowkiller.game",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0b0418"
+      },
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+        
+      ]
+    },
+    "plugins": [
+      ["expo-audio", { "microphonePermission": false }],
+      ["expo-splash-screen", { "image": "./assets/splash-icon.png", "backgroundColor": "#05050a", "imageWidth": 220 }]
+    ]
+  }
+}
+
+
+========== tsconfig.json ==========
+{
+  "compilerOptions": {},
+  "extends": "expo/tsconfig.base"
+}
+
+
+========== src/config/graphics.ts ==========
+import type { AmbientStyle } from '../engine/particles';
+
+export type Quality = 'low' | 'medium' | 'high' | 'ultra';
+export const QUALITY_ORDER: Quality[] = ['low', 'medium', 'high', 'ultra'];
+
+export interface GraphicsPreset {
+  label: string; description: string;
+  ambient: number;      // ambient particles drawn (embers, snow, ...)
+  impactPerHit: number; // hit particles per hit
+  impactCap: number;    // size of the hit-particle pool
+  parallax: number;     // background layers (1..3)
+  glow: boolean;        // weapon halo shapes
+  fog: boolean;         // placeholder fog band
+  hitFx: boolean;       // weapon-specific hit effect (rings, crossed slashes, ...)
+}
+
+/** Presets only reduce effects. There is no render-resolution scaling. */
+export const PRESETS: Record<Quality, GraphicsPreset> = {
+  low:    { label: 'Low',    description: 'Fewest effects. Best for older phones.',        ambient: 0,  impactPerHit: 5,  impactCap: 24,  parallax: 1, glow: false, fog: false, hitFx: false },
+  medium: { label: 'Medium', description: 'Balanced. A good default for mid-range phones.', ambient: 16, impactPerHit: 9,  impactCap: 48,  parallax: 2, glow: false, fog: false, hitFx: true },
+  high:   { label: 'High',   description: 'Full backgrounds, glow and fog.',                ambient: 36, impactPerHit: 13, impactCap: 80,  parallax: 3, glow: true,  fog: true,  hitFx: true },
+  ultra:  { label: 'Ultra',  description: 'Maximum particles. For strong phones.',          ambient: 64, impactPerHit: 18, impactCap: 120, parallax: 3, glow: true,  fog: true,  hitFx: true },
+};
+
+export const WORLD_AMBIENT: AmbientStyle[] = ['motes', 'ash', 'snow', 'embers', 'void'];
+export const ambientStyleFor = (world: number): AmbientStyle => WORLD_AMBIENT[world - 1] ?? 'motes';
+
+export const AMBIENT_LOOK: Record<AmbientStyle, { color: string; size: number; opacity: number }> = {
+  motes:  { color: '#cfd6ff', size: 2.5, opacity: 0.55 },
+  ash:    { color: '#ff9a8a', size: 2.5, opacity: 0.5 },
+  snow:   { color: '#ffffff', size: 3,   opacity: 0.8 },
+  embers: { color: '#ffb04d', size: 3,   opacity: 0.85 },
+  void:   { color: '#c04bff', size: 3,   opacity: 0.7 },
+};
+
+export function lowerQuality(q: Quality): Quality {
+  return QUALITY_ORDER[Math.max(0, QUALITY_ORDER.indexOf(q) - 1)];
+}
+
+
+========== src/config/perf.ts ==========
+/**
+ * Watches frame times and says when to drop one graphics level. Pure and testable.
+ * It judges windows of frames, ignores hitches (app switches, pauses) and never raises quality.
+ */
+export class PerfGovernor {
+  private acc = 0;
+  private frames = 0;
+  private cooldown = 0;
+
+  constructor(
+    private readonly targetMs: number,
+    private readonly windowMs = 2000,
+    private readonly slack = 1.35,
+  ) {}
+
+  /** Feed one frame time in milliseconds. Returns true when quality should drop one level. */
+  sample(ms: number): boolean {
+    if (!(ms > 0) || ms > 100) return false;
+    this.acc += ms;
+    this.frames += 1;
+    if (this.acc < this.windowMs) return false;
+    const avg = this.acc / this.frames;
+    this.acc = 0;
+    this.frames = 0;
+    if (this.cooldown > 0) { this.cooldown -= 1; return false; } // let a change settle for one window
+    if (avg > this.targetMs * this.slack) { this.cooldown = 1; return true; }
+    return false;
+  }
+}
+
+
+========== src/engine/constants.ts ==========
+import type { AttackKind } from './types';
+
+export const WORLD_W = 800;
+export const WORLD_H = 360;
+export const GROUND_Y = 300;
+export const FIXED_DT = 1 / 60;
+export const GRAVITY = 1800;
+
+export const FIGHTER_W = 40;
+export const FIGHTER_H = 80;
+export const MOVE_SPEED = 220;
+export const JUMP_VELOCITY = 700;
+
+export const DODGE_TIME = 0.25; // also the i-frame duration
+export const DODGE_SPEED = 420;
+export const HURT_TIME = 0.3;
+export const HIT_INVULN = 0.25;       // i-frames after the player is hit
+export const ENEMY_HIT_INVULN = 0.08; // short, so combo chains are not swallowed
+export const BLOCK_REDUCTION = 0.8;
+export const HITSTOP = 0.05;
+export const ARMOR_BREAK_KNOCKBACK = 300; // armored enemies only stagger at/above this
+
+export const BUFFER_TIME = 0.18; // input buffer window (seconds)
+export const COMBO_WINDOW = 2.0;
+export const MAX_COMBO_STACKS = 10;
+export const COMBO_BONUS_PER_HIT = 0.03;
+export const DODGE_COOLDOWN = 0.6; // seconds from the start of one dodge to the earliest next one (0 = no limit)
+
+export const PLAYER_MAX_HP = 100;
+export const MAX_ENERGY = 100;
+export const SPECIAL_COST = 50;
+export const SPECIAL = { windup: 0.15, duration: 0.5, radius: 150, damage: 30, knockback: 420 };
+export const ENERGY_ON_BLOCK = 4;
+export const ENERGY_GAIN: Record<AttackKind | 'special', number> = {
+  light1: 6, light2: 6, light3: 10, heavy: 12, special: 0,
+  
+};
+
+export const ENEMY_BLOCK_TIME = 0.5;
+export const ENEMY_HURT_TIME = 0.35;
+export const MAX_ENEMIES = 4;
+export const MAX_PROJECTILES = 8;
+export const PROJECTILE_W = 18;
+export const PROJECTILE_H = 10;
+export const PROJECTILE_Y = 40; // height above the shooter's feet
+export const WAVE_DELAY = 1.0;
+
+export const MIN_TELEGRAPH = 0.25;        // no first-strike wind-up is ever shorter than this
+export const MIN_TELEGRAPH_CHAIN = 0.2;   // follow-up strikes of multi-strike enemies
+export const MAX_ENEMY_DAMAGE = 60;       // fairness cap on any single enemy hit
+export const MAX_HAZARDS = 2;
+export const HAZARD_WARN = 0.9;           // visible warning before a hazard fires
+export const HAZARD_ACTIVE = 0.6;
+export const HAZARD_H = 14;
+export const ICE_GRIP = 2.5;              // how quickly velocity follows input on ice
+
+export const FX_TIME = 0.3; // seconds a hit effect plays
+
+export const ROAR_TIME = 1.2;   // boss phase-change pause (invulnerable)
+export const MAX_EVENTS = 16;   // cap on queued audio events per frame batch
+
+
+========== src/engine/render.ts ==========
+import { PLAYER_ATTACKS, attackHitbox } from './combat';
+import { defOf, enemyAttackDef } from './enemies';
+import {
+  FIGHTER_H, FX_TIME, MAX_ENEMIES, MAX_ENERGY, MAX_HAZARDS, MAX_PROJECTILES, SPECIAL,
+} from './constants';
+import { HAZARD_BASE, hazardPhase } from './hazards';
+import { poseFor } from './pose';
+import type { Arena, Fighter } from './types';
+import type { AttackDef } from './combat';
+
+/** Plain data the renderer needs each frame. No Skia/React imports here. */
+export interface FighterFrame {
+  x: number; y: number; facing: number; lean: number; weapon: number; squash: number;
+  opacity: number; warn: number; visible: number; color: string;
+  slashX: number; slashY: number; slashW: number; slashOn: number;
+}
+export interface ProjectileFrame { x: number; y: number; on: number }
+export interface HazardFrame { x: number; w: number; opacity: number; color: string; on: number }
+export interface RenderFrame {
+  player: FighterFrame;
+  enemies: FighterFrame[];         // always MAX_ENEMIES long
+  projectiles: ProjectileFrame[];  // always MAX_PROJECTILES long
+  hazards: HazardFrame[];          // always MAX_HAZARDS long
+  fx: { x: number; y: number; k: number; on: number };
+  playerHp: number; energy: number; enemyHp: number; // 0..1
+  bossHp: number;                  // 0..1, or -1 when no boss is alive
+}
+
+const HIDDEN: FighterFrame = {
+  x: 0, y: 0, facing: 1, lean: 0, weapon: 0, squash: 1, opacity: 0, warn: 0, visible: 0,
+  color: '#000000', slashX: 0, slashY: 0, slashW: 0, slashOn: 0,
+};
+const HIDDEN_HAZARD: HazardFrame = { x: 0, w: 0, opacity: 0, color: '#000000', on: 0 };
+
+function frameOf(
+  f: Fighter, def: AttackDef | null, color: string, warn: boolean,
+  slash: { x: number; w: number; on: number } | null,
+): FighterFrame {
+  const pose = poseFor(f, def);
+  return {
+    x: f.x, y: f.y, facing: f.facing, lean: pose.lean, weapon: pose.weapon, squash: pose.squash,
+    opacity: f.state === 'dead' ? 0.35 : f.invuln > 0 ? 0.5 : 1,
+    warn: warn ? 1 : 0, visible: 1,
+    color: f.state === 'hurt' ? '#ffffff' : color,
+    slashX: slash?.x ?? 0, slashY: f.y - FIGHTER_H * 0.8, slashW: slash?.w ?? 0, slashOn: slash?.on ?? 0,
+  };
+}
+
+export function buildFrame(a: Arena, playerColor = '#7a2cff'): RenderFrame {
+  const p = a.player;
+  const pdef = p.state === 'attack' && p.attackKind ? PLAYER_ATTACKS[p.attackKind] : null;
+  let pslash: { x: number; w: number; on: number } | null = null;
+  if (pdef) {
+    const b = attackHitbox(p, { ...pdef, reach: pdef.reach * a.perks.reach });
+    if (b) pslash = { x: b.x, w: b.w, on: 0.8 };
+  } else if (p.state === 'special' && p.t < 0.3) {
+    pslash = { x: p.x - SPECIAL.radius, w: SPECIAL.radius * 2, on: 0.35 };
+  }
+
+  const enemies: FighterFrame[] = [];
+  let hp = 0, maxHp = 0, bossHp = -1;
+  for (let i = 0; i < MAX_ENEMIES; i++) {
+    const e = a.enemies[i];
+    if (!e) { enemies.push(HIDDEN); continue; }
+    const d = defOf(e);
+    const def = enemyAttackDef(d);
+    const box = d.style === 'shot' ? null : attackHitbox(e, def);
+    enemies.push(frameOf(e, def, d.color, e.state === 'telegraph',
+      box ? { x: box.x, w: box.w, on: 0.8 } : null));
+    hp += e.hp; maxHp += e.maxHp;
+    if (e.boss && e.state !== 'dead') bossHp = e.hp / e.maxHp;
+  }
+
+  const projectiles = [];
+  for (let i = 0; i < MAX_PROJECTILES; i++) {
+    const pr = a.projectiles[i];
+    projectiles.push(pr ? { x: pr.x, y: pr.y, on: 1 } : { x: 0, y: 0, on: 0 });
+  }
+
+  const hazards: HazardFrame[] = [];
+  for (let i = 0; i < MAX_HAZARDS; i++) {
+    const h = a.hazards[i];
+    if (!h) { hazards.push(HIDDEN_HAZARD); continue; }
+    const phase = hazardPhase(h, a.time);
+    let opacity = 0.18;                                       // dormant: faint marking
+    if (h.kind === 'ice') opacity = 0.5;
+    else if (phase === 2) opacity = 0.95;                     // active: bright and solid
+    else if (phase === 1) opacity = Math.floor(a.time * 8) % 2 === 0 ? 0.7 : 0.25; // warning: blinks
+    hazards.push({ x: h.x, w: h.w, opacity, color: HAZARD_BASE[h.kind].color, on: 1 });
+  }
+
+  return {
+    player: frameOf(p, pdef, playerColor, false, pslash),
+    enemies, projectiles, hazards,
+    fx: a.fx.on
+      ? { x: a.fx.x, y: a.fx.y, k: Math.min(1, a.fx.age / FX_TIME), on: 1 }
+      : { x: 0, y: 0, k: 1, on: 0 },
+    playerHp: p.hp / p.maxHp,
+    energy: a.energy / MAX_ENERGY,
+    enemyHp: maxHp > 0 ? hp / maxHp : 0,
+    bossHp,
+  };
+}
+
+
+========== src/engine/particles.ts ==========
+import { GROUND_Y, WORLD_W } from './constants';
+
+export type AmbientStyle = 'motes' | 'ash' | 'snow' | 'embers' | 'void';
+export interface Point { x: number; y: number }
+
+export interface Pool {
+  cap: number;
+  x: Float32Array; y: Float32Array; vx: Float32Array; vy: Float32Array; life: Float32Array;
+}
+
+/** Visual-only. Owns its own seeded random generator so it can never affect combat. */
+export interface ParticleSystem {
+  style: AmbientStyle;
+  ambient: Pool; impact: Pool; hurt: Pool;
+  ambientActive: number; // how many ambient particles are currently drawn (<= ambient.cap)
+  perHit: number;        // impact particles per hit
+  heads: [number, number];
+  seed: number;
+}
+
+export const NO_POINTS: Point[] = [{ x: -50, y: -50 }]; // drawn off-screen when a group is empty
+
+const RISING: Record<AmbientStyle, boolean> = { motes: true, ash: false, snow: false, embers: true, void: true };
+
+function makePool(cap: number): Pool {
+  const n = Math.max(0, Math.floor(cap));
+  return {
+    cap: n, x: new Float32Array(n), y: new Float32Array(n),
+    vx: new Float32Array(n), vy: new Float32Array(n), life: new Float32Array(n),
+  };
+}
+
+function rand(ps: ParticleSystem): number {
+  ps.seed = (Math.imul(ps.seed, 1664525) + 1013904223) >>> 0;
+  return ps.seed / 4294967296;
+}
+
+function spawnAmbient(ps: ParticleSystem, i: number, anywhere: boolean): void {
+  const p = ps.ambient;
+  p.x[i] = rand(ps) * WORLD_W;
+  p.y[i] = anywhere ? rand(ps) * GROUND_Y : RISING[ps.style] ? GROUND_Y : -4;
+  const r = rand(ps);
+  switch (ps.style) {
+    case 'motes':  p.vx[i] = (r - 0.5) * 16;      p.vy[i] = -(6 + rand(ps) * 8); break;
+    case 'ash':    p.vx[i] = 12 + r * 14;         p.vy[i] = 14 + rand(ps) * 14; break;
+    case 'snow':   p.vx[i] = (r - 0.5) * 20;      p.vy[i] = 25 + rand(ps) * 25; break;
+    case 'embers': p.vx[i] = (r - 0.5) * 28;      p.vy[i] = -(30 + rand(ps) * 40); break;
+    case 'void':   p.vx[i] = (r - 0.5) * 20;      p.vy[i] = -(4 + rand(ps) * 10); break;
+  }
+  p.life[i] = 1;
+}
+
+export function createParticles(
+  style: AmbientStyle, ambientCount: number, impactCap: number, perHit: number, seed = 12345,
+): ParticleSystem {
+  const ps: ParticleSystem = {
+    style, ambient: makePool(ambientCount), impact: makePool(impactCap),
+    hurt: makePool(Math.floor(impactCap / 2)),
+    ambientActive: Math.max(0, Math.floor(ambientCount)), perHit: Math.max(0, Math.floor(perHit)),
+    heads: [0, 0], seed: seed >>> 0,
+  };
+  for (let i = 0; i < ps.ambient.cap; i++) spawnAmbient(ps, i, true);
+  return ps;
+}
+
+/** Lower (never raise past the pool size) the drawn amount at runtime, e.g. after an auto-downgrade. */
+export function setParticleLimits(ps: ParticleSystem, ambientActive: number, perHit: number): void {
+  ps.ambientActive = Math.max(0, Math.min(ps.ambient.cap, Math.floor(ambientActive)));
+  ps.perHit = Math.max(0, Math.floor(perHit));
+}
+
+function burst(ps: ParticleSystem, pool: Pool, which: 0 | 1, x: number, y: number, count: number, power: number): void {
+  if (pool.cap === 0) return;
+  const n = Math.max(0, Math.floor(count));
+  for (let k = 0; k < n; k++) {
+    const i = ps.heads[which];
+    ps.heads[which] = (i + 1) % pool.cap;
+    const ang = rand(ps) * Math.PI * 2;
+    const sp = power * (0.4 + rand(ps) * 0.6);
+    pool.x[i] = x; pool.y[i] = y;
+    pool.vx[i] = Math.cos(ang) * sp;
+    pool.vy[i] = Math.sin(ang) * sp - power * 0.25;
+    pool.life[i] = 0.25 + rand(ps) * 0.25;
+  }
+}
+
+export function emitImpact(ps: ParticleSystem, x: number, y: number, count: number, power = 180): void {
+  burst(ps, ps.impact, 0, x, y, count, power);
+}
+export function emitHurt(ps: ParticleSystem, x: number, y: number, count: number, power = 160): void {
+  burst(ps, ps.hurt, 1, x, y, count, power);
+}
+
+function stepBurst(p: Pool, dt: number): void {
+  for (let i = 0; i < p.cap; i++) {
+    if (p.life[i] <= 0) continue;
+    p.life[i] -= dt;
+    if (p.life[i] <= 0) { p.life[i] = 0; continue; }
+    p.x[i] += p.vx[i] * dt;
+    p.vy[i] += 520 * dt;
+    p.y[i] += p.vy[i] * dt;
+  }
+}
+
+export function stepParticles(ps: ParticleSystem, dt: number, time: number): void {
+  const a = ps.ambient;
+  const n = Math.min(ps.ambientActive, a.cap);
+  const rising = RISING[ps.style];
+  const sway = ps.style === 'snow' || ps.style === 'embers';
+  for (let i = 0; i < n; i++) {
+    a.x[i] += (a.vx[i] + (sway ? Math.sin(time * 1.5 + i) * 8 : 0)) * dt;
+    a.y[i] += a.vy[i] * dt;
+    if (a.x[i] < 0) a.x[i] += WORLD_W; else if (a.x[i] > WORLD_W) a.x[i] -= WORLD_W;
+    if (rising ? a.y[i] < -8 : a.y[i] > GROUND_Y) spawnAmbient(ps, i, false);
+  }
+  stepBurst(ps.impact, dt);
+  stepBurst(ps.hurt, dt);
+}
+
+export function liveCount(p: Pool, limit = p.cap): number {
+  let n = 0;
+  for (let i = 0; i < Math.min(limit, p.cap); i++) if (p.life[i] > 0) n += 1;
+  return n;
+}
+
+/** Live particles as drawable points (a shared off-screen point when there are none). */
+export function pointsOf(p: Pool, limit = p.cap): Point[] {
+  const out: Point[] = [];
+  for (let i = 0; i < Math.min(limit, p.cap); i++) if (p.life[i] > 0) out.push({ x: p.x[i], y: p.y[i] });
+  return out.length > 0 ? out : NO_POINTS;
+}
+
+
+========== src/engine/pose.ts ==========
+import type { AttackDef } from './combat';
+import type { Fighter } from './types';
+
+/** lean/weapon in radians (positive = clockwise = forward/down); squash = vertical scale. */
+export interface Pose { lean: number; weapon: number; squash: number }
+
+const lerp = (a: number, b: number, k: number) => a + (b - a) * Math.min(1, Math.max(0, k));
+
+/** Animation state machine output: a pose derived from state + time-in-state. */
+export function poseFor(f: Fighter, def: AttackDef | null): Pose {
+  switch (f.state) {
+    case 'attack': {
+      if (!def) return { lean: 0, weapon: 0.5, squash: 1 };
+      if (f.t < def.windup) {
+        const k = f.t / def.windup;
+        return { lean: lerp(0, -0.15, k), weapon: lerp(0.5, -1.6, k), squash: 1 };
+      }
+      if (f.t < def.windup + def.active) {
+        const k = (f.t - def.windup) / def.active;
+        return { lean: lerp(-0.15, 0.25, k), weapon: lerp(-1.6, 1.2, k), squash: 1 };
+      }
+      const k = (f.t - def.windup - def.active) / def.recovery;
+      return { lean: lerp(0.25, 0, k), weapon: lerp(1.2, 0.5, k), squash: 1 };
+    }
+    case 'telegraph': return { lean: -0.12, weapon: -1.9, squash: 1 };
+    case 'block':     return { lean: -0.05, weapon: -0.4, squash: 1 };
+    case 'hurt':      return { lean: -0.35, weapon: 1.0, squash: 1 };
+    case 'dead':      return { lean: lerp(0, -1.45, f.t / 0.3), weapon: 1.2, squash: 1 };
+    case 'dodge':     return { lean: 0.5, weapon: 0.8, squash: 0.82 };
+    case 'special':   return { lean: 0, weapon: f.t * 20, squash: 1 };
+    case 'recovery':  return { lean: 0.1, weapon: 0.5, squash: 1 };
+    case 'walk':
+    case 'approach':  return { lean: 0.06, weapon: 0.6, squash: 1 };
+    default:          return { lean: 0, weapon: 0.5, squash: 1 };
+  }
+}
+
+
+========== src/screens/ArenaScreen.tsx ==========
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Canvas, Circle, Group, Points, Rect } from '@shopify/react-native-skia';
+import { useDerivedValue, useSharedValue } from 'react-native-reanimated';
+import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { RootStackParamList } from '../navigation/types';
+import { createArena, emptyInput, stepArena } from '../engine/arena';
+import {
+  FIXED_DT, GROUND_Y, MAX_ENEMIES, MAX_HAZARDS, MAX_PROJECTILES, WORLD_H, WORLD_W,
+} from '../engine/constants';
+import { BOSSES, bossLabel } from '../engine/bosses';
+import { NO_POINTS, Point, pointsOf, setParticleLimits } from '../engine/particles';
+import { RenderFrame, buildFrame } from '../engine/render';
+import { TUTORIAL_STEPS } from '../engine/tutorial';
+import { Arena, EnemyKind, Input } from '../engine/types';
+import { FighterView, HazardView, ProjectileView } from '../components/FighterView';
+import { HitFxView } from '../components/HitFxView';
+import { Background } from '../components/Background';
+import { enemyLookFor, enemyWeaponFor } from '../cosmetics/enemyLook';
+import { resolveCharacter, resolveWeapon } from '../cosmetics/catalog';
+import { applyChallenge, getLevel } from '../levels';
+import { LevelConfig } from '../levels/types';
+import { evaluateRun } from '../levels/scoring';
+import { RewardBreakdown, isLevelUnlocked } from '../levels/progress';
+import { WORLDS } from '../levels/worlds';
+import { useSave } from '../persistence/SaveProvider';
+import { AMBIENT_LOOK, PRESETS, Quality, ambientStyleFor, lowerQuality } from '../config/graphics';
+import { PerfGovernor } from '../config/perf';
+import { SHOW_PERF } from '../config/dev';
+import { FrameStats } from '../config/frameStats';
+import { MusicTrack, playMusic, playSfx } from '../audio/audio';
+import { DefeatPanel, PauseMenu, VictoryPanel } from '../ui/ResultOverlays';
+import { Joystick } from '../ui/Joystick';
+import { joystickToInput } from '../ui/controlsLogic';
+import { buzz } from '../ui/haptics';
+import { Panel } from '../ui/Panel';
+import { perksFor } from '../skills/progress';
+import { levelFor, xpFromCoins } from '../skills/xp';
+import { combinePerks } from '../engine/perks';
+import { gearPerks } from '../gear/progress';
+import { playerCharacterVisual, playerWeaponVisual } from '../gear/looks';
+
+type Props = NativeStackScreenProps<RootStackParamList, 'Arena'>;
+type OneShot = 'light' | 'heavy' | 'jump' | 'dodge' | 'special';
+type Held = 'left' | 'right' | 'block';
+interface Hud { combo: number; wave: number; step: number; boss: string; kinds: string }
+interface Summary { stars: number; score: number; objectiveMet: boolean; reward: RewardBreakdown | null;  xp: number; levelUp: boolean; }
+
+const sameHud = (a: Hud, b: Hud) =>
+  a.combo === b.combo && a.wave === b.wave && a.step === b.step && a.boss === b.boss && a.kinds === b.kinds;
+
+const readHud = (a: Arena): Hud => ({
+  combo: a.combo.count, wave: a.wave, step: a.tutorial ? a.tutorial.index : -1,
+  boss: bossLabel(a), kinds: a.enemies.map((e) => e.kind).join(','),
+});
+
+function makeArena(cfg: LevelConfig | null, q: Quality, perks?: ReturnType<typeof perksFor>): Arena {
+  const p = PRESETS[q];
+  const particles = {
+    style: ambientStyleFor(cfg?.world ?? 1), ambient: p.ambient, impactCap: p.impactCap, perHit: p.impactPerHit,
+  };
+  if (!cfg) return createArena({ waves: [], tutorial: true, particles });
+  return createArena({
+    waves: cfg.waves, scaling: cfg.scaling, hazards: cfg.hazards, healPerWave: cfg.healPerWave,
+    world: cfg.world, miniBoss: cfg.miniBoss, particles, perks,
+  });
+}
+
+const ENEMY_SLOTS = Array.from({ length: MAX_ENEMIES }, (_, i) => i);
+const PROJECTILE_SLOTS = Array.from({ length: MAX_PROJECTILES }, (_, i) => i);
+const HAZARD_SLOTS = Array.from({ length: MAX_HAZARDS }, (_, i) => i);
+
+export default function ArenaScreen({ navigation, route }: Props) {
+  const params = route.params;
+  const { save, recordResult } = useSave();
+  const settings = save.settings;
+  const vibrationRef = useRef(settings.vibration);
+  vibrationRef.current = settings.vibration;
+  const jumpHeld = useRef(false);
+  const challenge = params.mode === 'level' && !!params.challenge;
+
+  const [character] = useState(() => ({ visual: playerCharacterVisual(save) }));
+  const [weapon] = useState(() => ({ visual: playerWeaponVisual(save) }));
+  const [perks] = useState(() => combinePerks(perksFor(save.hero.ranks), gearPerks(save)));
+
+  const cfg = useMemo<LevelConfig | null>(() => {
+    if (params.mode !== 'level') return null;
+    const base = getLevel(params.world, params.level);
+    return params.challenge ? applyChallenge(base) : base;
+  }, [params]);
+  const worldIdx = params.mode === 'level' ? params.world : 1;
+  const worldDef = WORLDS[worldIdx - 1];
+  const palette = worldDef.palette;
+  const bossInfo = cfg && (cfg.worldBoss || cfg.miniBoss) ? BOSSES[cfg.world] : null;
+
+  const { width, height } = useWindowDimensions();
+  const scale = Math.min(width / WORLD_W, height / WORLD_H);
+  const offX = (width - WORLD_W * scale) / 2;
+  const offY = (height - WORLD_H * scale) / 2;
+
+  // Graphics: starts at the saved preset and can only be lowered during a session.
+  const [quality, setQuality] = useState<Quality>(settings.graphics);
+  const qualityRef = useRef<Quality>(settings.graphics);
+  const preset = PRESETS[quality];
+  const governor = useMemo(() => new PerfGovernor(1000 / settings.fps), [settings.fps]);
+  const governorRef = useRef(governor);
+  governorRef.current = governor;
+  const minInterval = useRef(1000 / settings.fps - 2);
+  const [toast, setToast] = useState('');
+
+  const frameStats = useRef(new FrameStats());
+  const [perfTxt, setPerfTxt] = useState('');
+
+  const [initial] = useState(() => makeArena(cfg, settings.graphics, perks));
+  const arena = useRef<Arena>(initial);
+  const input = useRef<Input>(emptyInput());
+  const paused = useRef(bossInfo !== null);
+  const shown = useRef(false);
+  const lastHud = useRef<Hud>(readHud(initial));
+
+  const [intro, setIntro] = useState(bossInfo !== null);
+  const [result, setResult] = useState<null | 'victory' | 'defeat'>(null);
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [hud, setHud] = useState<Hud>(lastHud.current);
+
+  const onOver = useRef<(a: Arena) => void>(() => {});
+  onOver.current = (a) => {
+    if (!cfg) { setResult(a.over); return; }
+    const run = evaluateRun(cfg, a);
+    const levelBefore = levelFor(save.hero.xp);
+    const out = recordResult(cfg, run, challenge, a.stats);
+    const reward = run.won ? out : null;
+    const xp = reward ? xpFromCoins(reward.total) : 0;
+    setSummary({
+      stars: run.stars, score: run.score, objectiveMet: run.objectiveMet, reward,
+      xp, levelUp: levelFor(save.hero.xp + xp) > levelBefore,
+    });
+    setResult(a.over);
+  };
+
+  const onDowngrade = useRef<() => void>(() => {});
+  onDowngrade.current = () => {
+    const next = lowerQuality(qualityRef.current);
+    if (next === qualityRef.current) return;
+    qualityRef.current = next;
+    setQuality(next);
+    setParticleLimits(arena.current.particles, PRESETS[next].ambient, PRESETS[next].impactPerHit);
+    setToast(`Graphics lowered to ${PRESETS[next].label} to keep the game smooth`);
+  };
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(''), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  useEffect(() => {
+    playMusic(bossInfo ? 'boss' : (`world_${worldIdx}` as MusicTrack));
+      return () => playMusic('menu');
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const frame = useSharedValue<RenderFrame>(buildFrame(initial, character.visual.body));
+  const shake = useSharedValue(0);
+  const ambientPts = useSharedValue<Point[]>(NO_POINTS);
+  const impactPts = useSharedValue<Point[]>(NO_POINTS);
+  const hurtPts = useSharedValue<Point[]>(NO_POINTS);
+
+  const transform = useDerivedValue(() => [
+    { translateX: offX + shake.value * scale },
+    { translateY: offY },
+    { scale },
+  ]);
+  const pHpW = useDerivedValue(() => frame.value.playerHp * 200);
+  const eHpW = useDerivedValue(() => frame.value.enemyHp * 200);
+  const enW = useDerivedValue(() => frame.value.energy * 120);
+  const enColor = useDerivedValue(() => (frame.value.energy >= 0.5 ? '#35d0ff' : '#2a6f8a'));
+  const bossW = useDerivedValue(() => Math.max(0, frame.value.bossHp) * 280);
+  const bossOn = useDerivedValue(() => (frame.value.bossHp >= 0 ? 1 : 0));
+
+  const sync = useCallback(() => {
+    const a = arena.current;
+    frame.value = buildFrame(a, character.visual.body);
+    shake.value = a.shake > 0 ? Math.sin(a.time * 90) * a.shake : 0;
+
+    const ps = a.particles;
+    if (ps.ambientActive > 0) ambientPts.value = pointsOf(ps.ambient, ps.ambientActive);
+    if (ps.impact.cap > 0) {
+      impactPts.value = pointsOf(ps.impact);
+      hurtPts.value = pointsOf(ps.hurt);
+    }
+
+    if (a.events.length > 0) {
+      for (const ev of a.events) { playSfx(ev); if (vibrationRef.current) buzz(ev); }
+      a.events.length = 0;
+    }
+
+    const next = readHud(a); // React state only changes when something visible changes (rare)
+    if (!sameHud(lastHud.current, next)) { lastHud.current = next; setHud(next); }
+    if (a.over && !shown.current) { shown.current = true; onOver.current(a); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let raf = 0;
+    let last = performance.now();
+    let lastSync = 0;
+    let lastPerf = last;
+    let acc = 0;
+    const loop = (now: number) => {
+      const ms = now - last;
+      const dt = Math.min(ms / 1000, 0.1);
+      last = now;
+      if (SHOW_PERF && !paused.current) {
+        frameStats.current.add(ms);
+        if (now - lastPerf >= 1000) {
+          lastPerf = now;
+          const s = frameStats.current.summary();
+          setPerfTxt(`${s.fps.toFixed(0)} fps · avg ${s.avgMs.toFixed(1)}ms · p95 ${s.p95Ms.toFixed(1)}ms · worst ${s.worstMs.toFixed(0)}ms · ${qualityRef.current}`);
+        }
+      }
+      if (!paused.current && !arena.current.over) {
+        acc += dt;
+        while (acc >= FIXED_DT) {
+          stepArena(arena.current, input.current, FIXED_DT);
+          const i = input.current; // one-shot buttons are consumed after the first sub-step
+          i.light = i.heavy = i.jump = i.dodge = i.special = false;
+          acc -= FIXED_DT;
+        }
+        if (governorRef.current.sample(ms)) onDowngrade.current();
+      }
+      if (now - lastSync >= minInterval.current) { lastSync = now; sync(); } // 30 FPS option skips frames
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [sync]);
+
+  const startFight = () => { paused.current = false; setIntro(false); };
+
+  const retry = () => {
+    arena.current = makeArena(cfg, qualityRef.current, perks);
+    input.current = emptyInput();
+    shown.current = false;
+    paused.current = false;
+    lastHud.current = readHud(arena.current);
+    setHud(lastHud.current);
+    setSummary(null);
+    setIsPaused(false);
+    setResult(null);
+  };
+
+  const hold = (k: Held) => ({
+    onPressIn: () => { input.current[k] = true; },
+    onPressOut: () => { input.current[k] = false; },
+  });
+  const tap = (k: OneShot) => ({ onPressIn: () => { input.current[k] = true; } });
+
+  const onStick = (dx: number, dy: number) => {
+    const r = joystickToInput(dx, dy, jumpHeld.current);
+    jumpHeld.current = r.jumpHeld;
+    const i = input.current;
+    i.left = r.left; i.right = r.right; i.block = r.block;
+    if (r.jump) i.jump = true;
+  };
+
+  const togglePause = () => {
+    if (intro) return;
+    paused.current = !paused.current;
+    input.current = emptyInput();
+    setIsPaused(paused.current);
+  };
+
+  const nextTarget = useMemo(() => {
+    if (params.mode !== 'level' || challenge) return null;
+    if (params.level < 100) return { world: params.world, level: params.level + 1 };
+    return params.world < 5 ? { world: params.world + 1, level: 1 } : null;
+  }, [params, challenge]);
+  const canNext = result === 'victory' && nextTarget !== null && isLevelUnlocked(save, nextTarget.world, nextTarget.level);
+
+  const kinds = hud.kinds.split(',');
+  const ambient = AMBIENT_LOOK[ambientStyleFor(worldIdx)];
+  const cs = settings.controlSize;
+  const prompt = params.mode === 'tutorial' ? TUTORIAL_STEPS[hud.step]?.prompt : undefined;
+  const title = result === 'victory'
+    ? (params.mode === 'tutorial' ? 'TUTORIAL COMPLETE' : 'VICTORY')
+    : result === 'defeat' ? 'DEFEAT' : 'PAUSED';
+  const r = summary?.reward;
+  const introName = bossInfo
+    ? (cfg?.miniBoss ? `CHAMPION OF ${bossInfo.name.toUpperCase()}` : bossInfo.name.toUpperCase())
+    : '';
+
+  return (
+    <View style={styles.root}>
+      <Canvas style={StyleSheet.absoluteFill}>
+        <Group transform={transform}>
+          {/* PLACEHOLDER ART: flat shapes and polygon silhouettes tinted with the world palette */}
+          <Rect x={0} y={0} width={WORLD_W} height={WORLD_H} color={palette.sky} />
+          <Circle cx={650} cy={70} r={38} color={palette.moon} opacity={0.85} />
+          <Background world={worldDef} layers={preset.parallax} fog={preset.fog} frame={frame} />
+          <Rect x={0} y={GROUND_Y} width={WORLD_W} height={WORLD_H - GROUND_Y} color={palette.ground} />
+
+          {preset.ambient > 0 && (
+            <Points points={ambientPts} mode="points" color={ambient.color} style="stroke"
+                    strokeWidth={ambient.size} strokeCap="square" opacity={ambient.opacity} />
+          )}
+
+          {HAZARD_SLOTS.map((i) => <HazardView key={i} frame={frame} index={i} />)}
+          {ENEMY_SLOTS.map((i) => {
+            const kind = (kinds[i] || 'melee') as EnemyKind;
+            return (
+              <FighterView key={`${i}-${kind}`} frame={frame} who={i} glow={preset.glow}
+                           look={enemyLookFor(kind, worldIdx)} weapon={enemyWeaponFor(kind)} />
+            );
+          })}
+          <FighterView frame={frame} who="player" look={character.visual} weapon={weapon.visual} glow={preset.glow} />
+          {preset.hitFx && <HitFxView frame={frame} style={weapon.visual.hitFx} color={weapon.visual.hitColor} />}
+          {PROJECTILE_SLOTS.map((i) => <ProjectileView key={i} frame={frame} index={i} />)}
+
+          <Points points={impactPts} mode="points" color={weapon.visual.hitColor} style="stroke"
+                  strokeWidth={3} strokeCap="square" />
+          <Points points={hurtPts} mode="points" color="#ff4d5e" style="stroke"
+                  strokeWidth={3} strokeCap="square" />
+
+          <Circle cx={24} cy={26} r={17} color={character.visual.body} />
+          <Circle cx={24} cy={26} r={17} color={character.visual.accent} style="stroke" strokeWidth={2} />
+          <Rect x={48} y={14} width={200} height={10} color="#222" />
+          <Rect x={48} y={14} width={pHpW} height={10} color="#4cd964" />
+          <Rect x={48} y={28} width={120} height={6} color="#222" />
+          <Rect x={48} y={28} width={enW} height={6} color={enColor} />
+          <Circle cx={776} cy={26} r={17} color="#b3263e" />
+          <Circle cx={776} cy={26} r={17} color="#ff8a9a" style="stroke" strokeWidth={2} />
+          <Rect x={552} y={14} width={200} height={10} color="#222" />
+          <Rect x={552} y={14} width={eHpW} height={10} color="#e0334c" />
+          <Rect x={260} y={42} width={280} height={8} color="#222" opacity={bossOn} />
+          <Rect x={260} y={42} width={bossW} height={8} color="#ff8c1a" opacity={bossOn} />
+        </Group>
+      </Canvas>
+
+      {cfg && (
+        <>
+          <Text style={styles.wave}>{challenge ? 'CHALLENGE · ' : ''}{cfg.id.toUpperCase()}  WAVE {hud.wave}/{cfg.waves.length}</Text>
+          <Text style={styles.objective}>★ {cfg.objective.label}</Text>
+        </>
+      )}
+      {hud.boss !== '' && <Text style={styles.bossName}>{hud.boss}</Text>}
+      {hud.combo >= 2 && <Text style={styles.combo}>{hud.combo} HIT COMBO</Text>}
+      {prompt && (
+        <View style={styles.prompt}>
+          <Text style={styles.promptTxt}>{hud.step + 1}/{TUTORIAL_STEPS.length}  {prompt}</Text>
+        </View>
+      )}
+      {!!toast && <View style={styles.toast}><Text style={styles.toastTxt}>{toast}</Text></View>}
+
+
+      {SHOW_PERF && !!perfTxt && <Text style={styles.perf}>{perfTxt}</Text>}
+
+            {settings.controls === 'joystick' ? (
+        <View style={[styles.cluster, { left: 24 }]}>
+          <Joystick size={Math.round(124 * cs)} onChange={onStick} />
+        </View>
+      ) : (
+        <View style={[styles.cluster, { left: 24, flexDirection: 'row' }]}>
+          <Btn label="◀" size={64 * cs} {...hold('left')} />
+          <Btn label="▶" size={64 * cs} {...hold('right')} />
+        </View>
+      )}
+      {cfg && (
+        <View style={[styles.badge, { left: width / 2 + 38 }]}>
+          <Text style={styles.badgeTxt}>{cfg.level}</Text>
+        </View>
+      )}
+      <View style={[styles.cluster, { right: 24 }]}>
+        <View style={styles.row}>
+          <Btn label="BLOCK" size={54 * cs} {...hold('block')} />
+          <Btn label="DODGE" size={54 * cs} {...tap('dodge')} />
+          <Btn label="JUMP" size={54 * cs} {...tap('jump')} />
+        </View>
+        <View style={styles.row}>
+          <Btn label="SPECIAL" size={64 * cs} {...tap('special')} />
+          <Btn label="HEAVY" size={76 * cs} {...tap('heavy')} />
+          <Btn label="ATK" size={76 * cs} {...tap('light')} />
+        </View>
+      </View>
+
+      <Pressable style={styles.pause} onPress={togglePause}>
+        <Text style={styles.pauseTxt}>{isPaused ? '▶' : 'II'}</Text>
+      </Pressable>
+
+      {intro && bossInfo && (
+        <Pressable style={styles.intro} onPress={startFight}>
+          <Text style={styles.introTag}>{cfg?.worldBoss ? 'WORLD BOSS' : 'MINI-BOSS'}</Text>
+          <Text style={[styles.introName, { color: palette.accent }]}>{introName}</Text>
+          <Text style={styles.introTitle}>{bossInfo.title}</Text>
+          <Text style={styles.introBlurb}>{bossInfo.blurb}</Text>
+          <Text style={styles.introBlurb}>
+            {cfg?.miniBoss ? 2 : bossInfo.phases.length} phases · wait for the yellow flash, then dodge or block
+          </Text>
+          <Text style={styles.introTap}>TAP TO FIGHT</Text>
+        </Pressable>
+      )}
+
+            {isPaused && !result && (
+        <PauseMenu
+          onResume={togglePause}
+          onRestart={retry}
+          onSettings={() => navigation.navigate('Settings')}
+          onMenu={() => navigation.navigate('Home')}
+        />
+      )}
+      {result === 'victory' && (
+        <VictoryPanel
+          title={title}
+          stars={summary?.stars}
+          score={summary?.score}
+          objectiveMet={summary?.objectiveMet}
+          reward={summary?.reward ?? null}
+          onNext={canNext && nextTarget
+            ? () => navigation.replace('Arena', { mode: 'level', world: nextTarget.world, level: nextTarget.level })
+            : undefined}
+          onRetry={retry}
+          onExit={() => navigation.goBack()}
+          exitLabel={cfg ? 'LEVELS' : 'HOME'}
+          xp={summary?.xp}
+          levelUp={summary?.levelUp}
+        />
+      )}
+      {result === 'defeat' && (
+        <DefeatPanel onRetry={retry} onExit={() => navigation.goBack()} exitLabel={cfg ? 'LEVELS' : 'HOME'} />
+      )}
+    </View>
+  );
+}
+
+function Btn(props: { label: string; size: number; onPressIn: () => void; onPressOut?: () => void }) {
+  const s = Math.round(props.size);
+  return (
+    <Pressable
+      onPressIn={props.onPressIn}
+      onPressOut={props.onPressOut}
+      style={({ pressed }) => [styles.btn, { width: s, height: s, borderRadius: s / 2 }, pressed && styles.btnDown]}
+    >
+      <Text style={styles.btnTxt}>{props.label}</Text>
+    </Pressable>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: '#000' },
+  cluster: { position: 'absolute', bottom: 12, gap: 8, alignItems: 'flex-end' },
+  row: { flexDirection: 'row', gap: 8, alignItems: 'flex-end' },
+  btn: {
+    backgroundColor: 'rgba(122,44,255,0.35)', borderWidth: 2, borderColor: 'rgba(191,163,255,0.7)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  btnDown: { backgroundColor: 'rgba(122,44,255,0.8)' },
+  btnTxt: { color: '#fff', fontWeight: '800', fontSize: 11 },
+  pause: { position: 'absolute', top: 8, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 16, paddingVertical: 6, borderRadius: 6 },
+  pauseTxt: { color: '#fff', fontWeight: '800' },
+  wave: { position: 'absolute', top: 40, right: 24, color: '#fff', fontWeight: '800', letterSpacing: 1, fontSize: 11 },
+  objective: { position: 'absolute', top: 56, right: 24, color: '#ffd24a', fontWeight: '700', fontSize: 11 },
+  bossName: { position: 'absolute', top: 54, alignSelf: 'center', color: '#ffb36b', fontWeight: '900', letterSpacing: 2, fontSize: 12 },
+  combo: { position: 'absolute', top: 76, right: 24, color: '#ffd24a', fontSize: 22, fontWeight: '900' },
+  prompt: { position: 'absolute', top: 44, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.65)', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 6 },
+  promptTxt: { color: '#fff', fontWeight: '700' },
+  toast: { position: 'absolute', top: 76, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.75)', paddingHorizontal: 12, paddingVertical: 5, borderRadius: 6 },
+  toastTxt: { color: '#ffd24a', fontWeight: '700', fontSize: 11 },
+  intro: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.88)', alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 40 },
+  introTag: { color: '#ff5566', fontWeight: '900', letterSpacing: 6, fontSize: 12 },
+  introName: { fontWeight: '900', letterSpacing: 4, fontSize: 30, textAlign: 'center' },
+  introTitle: { color: '#e8e8f5', fontWeight: '700', fontSize: 14, letterSpacing: 2 },
+  introBlurb: { color: '#aab', fontSize: 12, textAlign: 'center' },
+  introTap: { color: '#fff', fontWeight: '900', letterSpacing: 5, marginTop: 14 },
+  overlay: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.75)', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  overTitle: { color: '#fff', fontSize: 34, fontWeight: '900', letterSpacing: 5 },
+  summary: { alignItems: 'center', gap: 2 },
+  stars: { color: '#ffd24a', fontSize: 30 },
+  sumTxt: { color: '#dde', fontWeight: '700' },
+  coinTxt: { color: '#ffd24a', fontWeight: '800' },
+  menuRow: { flexDirection: 'row', gap: 10, marginTop: 6 },
+  menuBtn: { backgroundColor: '#7a2cff', paddingHorizontal: 30, paddingVertical: 10, borderRadius: 8 },
+  menuTxt: { color: '#fff', fontWeight: '800', letterSpacing: 3 },
+  perf: { position: 'absolute', top: 70, left: 24, color: '#7fff9f', fontSize: 10, fontWeight: '700' },
+  badge: { position: 'absolute', top: 6, width: 30, height: 30, borderRadius: 15, backgroundColor: '#f5a623', alignItems: 'center', justifyContent: 'center' },
+  badgeTxt: { color: '#1b1206', fontWeight: '900', fontSize: 12 },
+});
+
+
+========== src/components/FighterArt.tsx ==========
+import React from 'react';
+import { Circle, Group, Rect } from '@shopify/react-native-skia';
+import type { SharedValue } from 'react-native-reanimated';
+import { FIGHTER_H, FIGHTER_W } from '../engine/constants';
+import type { CharacterFeature, CharacterVisual, WeaponVisual } from '../cosmetics/types';
+
+type ColorProp = string | SharedValue<string>;
+
+/**
+ * PLACEHOLDER ART: layered shapes in local coordinates (origin = feet, +x = facing).
+ * Purely visual. Extras like capes can poke slightly outside the hitbox, which never changes.
+ */
+export function CharacterArt({ look, color }: { look: CharacterVisual; color: ColorProp }) {
+  const W = FIGHTER_W * look.widthScale;
+  const bodyH = FIGHTER_H * 0.78 * look.heightScale;
+  const headR = FIGHTER_H * 0.12 * look.headScale;
+  const headY = -bodyH - headR * 0.83;
+  const has = (f: CharacterFeature) => look.features.includes(f);
+
+  return (
+    <>
+      {has('cape') && <Rect x={-W / 2 - 12} y={-bodyH * 0.95} width={16} height={bodyH * 0.9} color={look.accent} opacity={0.9} />}
+      {has('tail') && <Rect x={-W / 2 - 18} y={-bodyH * 0.3} width={20} height={5} color={look.accent} />}
+      {has('scarf') && <Rect x={-W / 2 - 16} y={-bodyH - 2} width={24} height={6} color={look.trim} />}
+      {has('spikes') && [0, 1, 2].map((i) => (
+        <Rect key={i} x={-W / 2 + 3 + i * 10} y={-bodyH - 9} width={4} height={10} color={look.accent} />
+      ))}
+
+      <Rect x={-W / 2} y={-bodyH} width={W} height={bodyH} color={color} />
+      <Rect x={-W / 2} y={-bodyH} width={W} height={bodyH} color={look.trim} style="stroke" strokeWidth={1.5} opacity={0.7} />
+      <Rect x={-W / 2} y={-bodyH * 0.45} width={W} height={4} color={look.accent} />
+
+      {has('pauldrons') && (
+        <>
+          <Rect x={-W / 2 - 6} y={-bodyH - 1} width={13} height={11} color={look.accent} />
+          <Rect x={W / 2 - 7} y={-bodyH - 1} width={13} height={11} color={look.accent} />
+        </>
+      )}
+
+      {has('hood') && <Circle cx={0} cy={headY} r={headR * 1.3} color={look.accent} />}
+      {has('halo') && <Circle cx={0} cy={headY - headR * 1.9} r={headR * 0.9} color={look.accent} style="stroke" strokeWidth={3} />}
+      <Circle cx={0} cy={headY} r={headR} color={color} />
+      {has('hat') && (
+        <>
+          <Rect x={-headR * 1.9} y={headY - headR - 1} width={headR * 3.8} height={4} color={look.accent} />
+          <Rect x={-headR * 0.7} y={headY - headR - 9} width={headR * 1.4} height={9} color={look.accent} />
+        </>
+      )}
+      {has('mask') && <Rect x={-headR * 0.9} y={headY} width={headR * 1.8} height={headR * 0.9} color={look.accent} />}
+      {has('horns') && [-1, 1].map((s) => (
+        <Group key={s} transform={[{ translateX: s * headR * 0.7 }, { translateY: headY - headR * 0.8 }, { rotate: s * 0.5 }]}>
+          <Rect x={-2} y={-14} width={4} height={16} color={look.trim} />
+        </Group>
+      ))}
+      <Rect x={headR * 0.15} y={headY - 2} width={headR * 0.8} height={3} color={look.eye} />
+    </>
+  );
+}
+
+/** Weapon drawn along +x from the hand (origin). `length` is drawing only; it never changes attack reach. */
+export function WeaponArt({ weapon, glow = true }: { weapon: WeaponVisual; glow?: boolean }) {
+  const L = weapon.length;
+  const { blade, handle } = weapon;
+  const weaponGlow = weapon.glow;
+  const halo = glow ? <Rect x={-4} y={-7} width={L + 8} height={14} color={weaponGlow} opacity={0.28} /> : null;
+
+  switch (weapon.shape) {
+    case 'katana':
+      return (<>{halo}
+        <Rect x={-10} y={-2.5} width={12} height={5} color={handle} />
+        <Rect x={2} y={-6} width={3} height={12} color={weaponGlow} />
+        <Rect x={5} y={-2} width={L - 5} height={4} color={blade} /></>);
+    case 'greatsword':
+      return (<>{halo}
+        <Rect x={-12} y={-3} width={14} height={6} color={handle} />
+        <Rect x={2} y={-8} width={4} height={16} color={weaponGlow} />
+        <Rect x={6} y={-5} width={L - 6} height={10} color={blade} /></>);
+    case 'dual':
+      return (<>{halo}
+        <Rect x={-6} y={-3} width={10} height={6} color={handle} />
+        <Rect x={4} y={-7} width={L * 0.85} height={3} color={blade} />
+        <Rect x={4} y={4} width={L * 0.85} height={3} color={blade} /></>);
+    case 'daggers':
+      return (<>
+        <Rect x={-6} y={-3} width={10} height={6} color={handle} />
+        <Rect x={4} y={-8} width={L * 0.6} height={3} color={blade} />
+        <Rect x={4} y={5} width={L * 0.6} height={3} color={blade} />
+        <Rect x={4} y={-8} width={L * 0.6} height={3} color={weaponGlow} opacity={0.35} />
+        <Rect x={4} y={5} width={L * 0.6} height={3} color={weaponGlow} opacity={0.35} /></>);
+    case 'spear':
+      return (<>{halo}
+        <Rect x={-14} y={-1.5} width={L} height={3} color={handle} />
+        <Group transform={[{ translateX: L }, { rotate: Math.PI / 4 }]}>
+          <Rect x={-5} y={-5} width={10} height={10} color={blade} />
+        </Group></>);
+    case 'scythe':
+      return (<>
+        <Rect x={-12} y={-2} width={L} height={4} color={handle} />
+        <Rect x={L - 18} y={-26} width={7} height={28} color={blade} />
+        <Rect x={L - 18} y={-26} width={7} height={28} color={weaponGlow} opacity={0.3} />
+        <Group transform={[{ translateX: L - 16 }, { translateY: -26 }, { rotate: 0.6 }]}>
+          <Rect x={0} y={-3} width={14} height={6} color={blade} />
+        </Group></>);
+    case 'chain':
+      return (<>
+        <Rect x={-8} y={-2} width={10} height={4} color={handle} />
+        {[0, 1, 2, 3].map((i) => <Circle key={i} cx={6 + i * L * 0.17} cy={0} r={3} color={handle} />)}
+        <Rect x={L * 0.7} y={-5} width={L * 0.3} height={10} color={weaponGlow} opacity={0.35} />
+        <Rect x={L * 0.7} y={-4} width={L * 0.3} height={8} color={blade} /></>);
+    case 'axe':
+      return (<>
+        <Rect x={-8} y={-2} width={L + 8} height={4} color={handle} />
+        <Rect x={L - 16} y={-15} width={14} height={30} color={blade} />
+        <Rect x={L - 2} y={-15} width={3} height={30} color={weaponGlow} /></>);
+    case 'staff':
+      return (<>
+        <Rect x={-10} y={-2} width={L + 10} height={4} color={handle} />
+        <Circle cx={L + 4} cy={0} r={11} color={weaponGlow} opacity={0.35} />
+        <Circle cx={L + 4} cy={0} r={6} color={blade} /></>);
+    default:
+      return null;
+  }
+}
+
+
+========== src/components/FighterView.tsx ==========
+import React from 'react';
+import { Rect } from '@shopify/react-native-skia';
+import { Group } from '@shopify/react-native-skia';
+import { SharedValue, useDerivedValue } from 'react-native-reanimated';
+import {
+  FIGHTER_H, FIGHTER_W, GROUND_Y, HAZARD_H, PROJECTILE_H, PROJECTILE_W,
+} from '../engine/constants';
+import type { RenderFrame } from '../engine/render';
+import type { CharacterVisual, WeaponVisual } from '../cosmetics/types';
+import { CharacterArt, WeaponArt } from './FighterArt';
+
+interface FighterProps {
+  frame: SharedValue<RenderFrame>;
+  who: 'player' | number; // 'player' or enemy slot index
+  look: CharacterVisual;
+  weapon: WeaponVisual;
+  glow?: boolean;
+}
+
+/** Pose, color, flash and slash come from the frame (per-frame); the skin itself is static. */
+export function FighterView({ frame, who, look, weapon, glow = true }: FighterProps) {
+  const f = useDerivedValue(() => (who === 'player' ? frame.value.player : frame.value.enemies[who]));
+
+  const transform = useDerivedValue(() => [
+    { translateX: f.value.x },
+    { translateY: f.value.y },
+    { scaleX: f.value.facing },
+    { scaleY: f.value.squash },
+    { rotate: f.value.lean },
+  ]);
+  const weaponTransform = useDerivedValue(() => [
+    { translateX: FIGHTER_W / 2 - 6 },
+    { translateY: -FIGHTER_H * 0.62 },
+    { rotate: f.value.weapon },
+  ]);
+  const opacity = useDerivedValue(() => f.value.opacity * f.value.visible);
+  const color = useDerivedValue(() => f.value.color);
+  const warn = useDerivedValue(() => f.value.warn * f.value.visible);
+  const slashX = useDerivedValue(() => f.value.slashX);
+  const slashY = useDerivedValue(() => f.value.slashY);
+  const slashW = useDerivedValue(() => f.value.slashW);
+  const slashOp = useDerivedValue(() => f.value.slashOn * f.value.visible);
+
+  return (
+    <>
+      <Group transform={transform} opacity={opacity}>
+        <CharacterArt look={look} color={color} />
+        <Rect x={-FIGHTER_W / 2} y={-FIGHTER_H * 0.78} width={FIGHTER_W} height={FIGHTER_H * 0.78}
+              color="#ffd24a" opacity={warn} />
+        <Group transform={weaponTransform}>
+          <WeaponArt weapon={weapon} glow={glow} />
+        </Group>
+      </Group>
+      <Rect x={slashX} y={slashY} width={slashW} height={FIGHTER_H * 0.6} color={weapon.trail} opacity={slashOp} />
+    </>
+  );
+}
+
+export function ProjectileView({ frame, index }: { frame: SharedValue<RenderFrame>; index: number }) {
+  const x = useDerivedValue(() => frame.value.projectiles[index].x - PROJECTILE_W / 2);
+  const y = useDerivedValue(() => frame.value.projectiles[index].y - PROJECTILE_H / 2);
+  const on = useDerivedValue(() => frame.value.projectiles[index].on);
+  return <Rect x={x} y={y} width={PROJECTILE_W} height={PROJECTILE_H} color="#7ff3ff" opacity={on} />;
+}
+
+export function HazardView({ frame, index }: { frame: SharedValue<RenderFrame>; index: number }) {
+  const x = useDerivedValue(() => frame.value.hazards[index].x);
+  const w = useDerivedValue(() => frame.value.hazards[index].w);
+  const op = useDerivedValue(() => frame.value.hazards[index].opacity * frame.value.hazards[index].on);
+  const color = useDerivedValue(() => frame.value.hazards[index].color);
+  return <Rect x={x} y={GROUND_Y - HAZARD_H} width={w} height={HAZARD_H} color={color} opacity={op} />;
+}
+
+
+========== src/components/Background.tsx ==========
+import React, { useMemo } from 'react';
+import { Group, Path, Rect } from '@shopify/react-native-skia';
+import { SharedValue, useDerivedValue } from 'react-native-reanimated';
+import { GROUND_Y, WORLD_H, WORLD_W } from '../engine/constants';
+import type { RenderFrame } from '../engine/render';
+import { BACKDROPS, LayerDef, layerPath, mixHex, pickLayers } from '../levels/backdrop';
+import type { WorldDef } from '../levels/worlds';
+
+function Layer({ frame, def, path, color }: {
+  frame: SharedValue<RenderFrame>; def: LayerDef; path: string; color: string;
+}) {
+  const t = useDerivedValue(() => [{ translateX: -(frame.value.player.x - WORLD_W / 2) * def.factor }]);
+  return (
+    <Group transform={t}>
+      <Path path={path} color={color} />
+    </Group>
+  );
+}
+
+/** PLACEHOLDER backdrop: polygon silhouettes with parallax. Clipped so it never spills into the letterbox. */
+export function Background({ world, layers, fog, frame }: {
+  world: WorldDef; layers: number; fog: boolean; frame: SharedValue<RenderFrame>;
+}) {
+  const items = useMemo(() => {
+    const defs = pickLayers(BACKDROPS[world.index], layers);
+    return defs.map((d, i) => ({
+      def: d,
+      path: layerPath(d, world.index * 31 + i),
+      color: mixHex(world.palette.sky, world.palette.accent, d.tint),
+    }));
+  }, [world, layers]);
+
+  return (
+    <Group clip={{ x: 0, y: 0, width: WORLD_W, height: WORLD_H }}>
+      {items.map((it, i) => <Layer key={i} frame={frame} def={it.def} path={it.path} color={it.color} />)}
+      {fog && (
+        <>
+          <Rect x={0} y={GROUND_Y - 80} width={WORLD_W} height={80} color={world.palette.accent} opacity={0.07} />
+          <Rect x={0} y={GROUND_Y - 36} width={WORLD_W} height={36} color={world.palette.accent} opacity={0.06} />
+        </>
+      )}
+    </Group>
+  );
+}
+
+
+========== src/components/HitFxView.tsx ==========
+import React from 'react';
+import { Circle, Group, Rect } from '@shopify/react-native-skia';
+import { SharedValue, useDerivedValue } from 'react-native-reanimated';
+import type { RenderFrame } from '../engine/render';
+import type { HitFxStyle } from '../cosmetics/types';
+
+const SPARKS = 6;
+const SPARK_IDX = Array.from({ length: SPARKS }, (_, i) => i);
+
+type Fx = { frame: SharedValue<RenderFrame>; color: string };
+
+function Spark({ frame, color, i, style }: Fx & { i: number; style: HitFxStyle }) {
+  const angle = (i / SPARKS) * Math.PI * 2 + (style === 'frost' ? Math.PI / 6 : 0);
+  const t = useDerivedValue(() => {
+    const fx = frame.value.fx;
+    const ease = 1 - (1 - fx.k) * (1 - fx.k);
+    const dist = (style === 'frost' ? 26 : 34) * ease;
+    const rise = style === 'ember' ? -fx.k * 22 : 0; // embers drift upward
+    return [
+      { translateX: fx.x + Math.cos(angle) * dist },
+      { translateY: fx.y + Math.sin(angle) * dist + rise },
+      { rotate: angle },
+    ];
+  });
+  const op = useDerivedValue(() => frame.value.fx.on * (1 - frame.value.fx.k));
+  const w = style === 'frost' ? 6 : style === 'ember' ? 4 : 10;
+  const h = style === 'frost' ? 6 : style === 'ember' ? 4 : 3;
+  return (
+    <Group transform={t} opacity={op}>
+      <Rect x={-w / 2} y={-h / 2} width={w} height={h} color={color} />
+    </Group>
+  );
+}
+
+function Ring({ frame, color }: Fx) {
+  const cx = useDerivedValue(() => frame.value.fx.x);
+  const cy = useDerivedValue(() => frame.value.fx.y);
+  const r = useDerivedValue(() => 6 + frame.value.fx.k * 34);
+  const op = useDerivedValue(() => frame.value.fx.on * (1 - frame.value.fx.k));
+  return <Circle cx={cx} cy={cy} r={r} color={color} style="stroke" strokeWidth={3} opacity={op} />;
+}
+
+function Cross({ frame, color }: Fx) {
+  const make = (angle: number) => useDerivedValue(() => [
+    { translateX: frame.value.fx.x },
+    { translateY: frame.value.fx.y },
+    { rotate: angle },
+    { scaleX: 0.3 + frame.value.fx.k },
+  ]);
+  const t1 = make(0.7);
+  const t2 = make(-0.7);
+  const op = useDerivedValue(() => frame.value.fx.on * (1 - frame.value.fx.k));
+  return (
+    <>
+      <Group transform={t1} opacity={op}><Rect x={-30} y={-1.5} width={60} height={3} color={color} /></Group>
+      <Group transform={t2} opacity={op}><Rect x={-30} y={-1.5} width={60} height={3} color={color} /></Group>
+    </>
+  );
+}
+
+/** Weapon-specific hit effect, driven by the engine's single `fx` event. Cosmetic only. */
+export function HitFxView({ frame, style, color }: { frame: SharedValue<RenderFrame>; style: HitFxStyle; color: string }) {
+  return (
+    <>
+      {style === 'ring' && <Ring frame={frame} color={color} />}
+      {style === 'slash' && <Cross frame={frame} color={color} />}
+      {(style === 'spark' || style === 'ember' || style === 'frost') &&
+        SPARK_IDX.map((i) => <Spark key={i} frame={frame} color={color} i={i} style={style} />)}
+    </>
+  );
+}
+
+
+========== src/levels/backdrop.ts ==========
+export type LayerKind = 'peaks' | 'spires' | 'trees' | 'crystals' | 'towers' | 'shards';
+
+export interface LayerDef {
+  kind: LayerKind;
+  factor: number; // parallax: how far the layer shifts as the player moves (0 = fixed)
+  baseY: number;  // the layer's baseline (the ground is drawn on top at y=300)
+  minH: number; maxH: number;
+  tint: number;   // 0..1 blend from the sky color toward the world accent
+}
+
+/** Far to near, per world. PLACEHOLDER silhouettes built from simple polygons. */
+export const BACKDROPS: Record<number, LayerDef[]> = {
+  1: [
+    { kind: 'peaks',   factor: 0.05, baseY: 250, minH: 90, maxH: 170, tint: 0.10 },
+    { kind: 'spires',  factor: 0.12, baseY: 275, minH: 70, maxH: 150, tint: 0.16 },
+    { kind: 'towers',  factor: 0.22, baseY: 302, minH: 40, maxH: 90,  tint: 0.22 },
+  ],
+  2: [
+    { kind: 'peaks',   factor: 0.05, baseY: 250, minH: 80, maxH: 150, tint: 0.12 },
+    { kind: 'trees',   factor: 0.12, baseY: 285, minH: 90, maxH: 170, tint: 0.18 },
+    { kind: 'trees',   factor: 0.22, baseY: 302, minH: 70, maxH: 130, tint: 0.26 },
+  ],
+  3: [
+    { kind: 'peaks',    factor: 0.05, baseY: 250, minH: 100, maxH: 180, tint: 0.14 },
+    { kind: 'crystals', factor: 0.12, baseY: 280, minH: 60,  maxH: 140, tint: 0.20 },
+    { kind: 'crystals', factor: 0.22, baseY: 302, minH: 40,  maxH: 90,  tint: 0.28 },
+  ],
+  4: [
+    { kind: 'towers', factor: 0.05, baseY: 260, minH: 100, maxH: 170, tint: 0.12 },
+    { kind: 'towers', factor: 0.12, baseY: 285, minH: 70,  maxH: 130, tint: 0.20 },
+    { kind: 'spires', factor: 0.22, baseY: 302, minH: 50,  maxH: 110, tint: 0.28 },
+  ],
+  5: [
+    { kind: 'shards',   factor: 0.05, baseY: 220, minH: 40, maxH: 90,  tint: 0.14 },
+    { kind: 'shards',   factor: 0.12, baseY: 250, minH: 30, maxH: 70,  tint: 0.20 },
+    { kind: 'crystals', factor: 0.22, baseY: 302, minH: 40, maxH: 100, tint: 0.28 },
+  ],
+};
+
+/** Which layers to draw for a given count: 1 = the middle one, 2 = far + near, 3 = all. */
+export function pickLayers(defs: LayerDef[], count: number): LayerDef[] {
+  if (count <= 1) return [defs[1] ?? defs[0]];
+  if (count === 2) return [defs[0], defs[defs.length - 1]];
+  return defs;
+}
+
+export function mixHex(a: string, b: string, t: number): string {
+  const pa = parseInt(a.slice(1), 16);
+  const pb = parseInt(b.slice(1), 16);
+  const ch = (shift: number) =>
+    Math.round(((pa >> shift) & 255) * (1 - t) + ((pb >> shift) & 255) * t);
+  return `#${((1 << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0)).toString(16).slice(1)}`;
+}
+
+function lcg(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+const f = (n: number) => Math.round(n * 10) / 10;
+
+/** One SVG path string for a whole layer. Deterministic for a given seed. */
+export function layerPath(def: LayerDef, seed: number, x0 = -420, x1 = 1220): string {
+  const rnd = lcg(seed * 7919 + 13);
+  const B = def.baseY;
+  const parts: string[] = [];
+  let x = x0;
+  while (x < x1) {
+    const h = def.minH + rnd() * (def.maxH - def.minH);
+    switch (def.kind) {
+      case 'peaks': {
+        const w = 90 + rnd() * 70;
+        parts.push(`M${f(x)} ${B}L${f(x + w / 2)} ${f(B - h)}L${f(x + w)} ${B}Z`);
+        x += w * 0.6; break;
+      }
+      case 'spires': {
+        const w = 18 + rnd() * 16;
+        parts.push(`M${f(x)} ${B}L${f(x + w / 2)} ${f(B - h)}L${f(x + w)} ${B}Z`);
+        x += w + 30 + rnd() * 40; break;
+      }
+      case 'trees': {
+        const w = 34 + rnd() * 22;
+        const cx = x + w / 2;
+        parts.push(`M${f(x)} ${f(B - h * 0.25)}L${f(cx)} ${f(B - h * 0.7)}L${f(x + w)} ${f(B - h * 0.25)}Z`);
+        parts.push(`M${f(x + w * 0.15)} ${f(B - h * 0.55)}L${f(cx)} ${f(B - h)}L${f(x + w * 0.85)} ${f(B - h * 0.55)}Z`);
+        parts.push(`M${f(cx - 3)} ${B}L${f(cx - 3)} ${f(B - h * 0.3)}L${f(cx + 3)} ${f(B - h * 0.3)}L${f(cx + 3)} ${B}Z`);
+        x += w + 14 + rnd() * 26; break;
+      }
+      case 'crystals': {
+        const w = 20 + rnd() * 20;
+        const cx = x + w / 2;
+        parts.push(`M${f(cx)} ${f(B - h)}L${f(x + w)} ${f(B - h * 0.45)}L${f(cx)} ${B}L${f(x)} ${f(B - h * 0.45)}Z`);
+        x += w + 20 + rnd() * 40; break;
+      }
+      case 'towers': {
+        const w = 40 + rnd() * 30;
+        const c = w / 5;
+        parts.push(`M${f(x)} ${B}L${f(x)} ${f(B - h)}L${f(x + w)} ${f(B - h)}L${f(x + w)} ${B}Z`);
+        for (let k = 0; k < 3; k++) {
+          const cx = x + c * (k * 2);
+          parts.push(`M${f(cx)} ${f(B - h)}L${f(cx)} ${f(B - h - 10)}L${f(cx + c)} ${f(B - h - 10)}L${f(cx + c)} ${f(B - h)}Z`);
+        }
+        x += w + 20 + rnd() * 50; break;
+      }
+      case 'shards': {
+        const w = 24 + rnd() * 30;
+        const y = B - h - rnd() * 60;
+        parts.push(`M${f(x)} ${f(y)}L${f(x + w)} ${f(y)}L${f(x + w / 2)} ${f(y + h)}Z`);
+        x += w + 60 + rnd() * 80; break;
+      }
+    }
+  }
+  return parts.join('');
+}
+
+
+========== src/levels/worlds.ts ==========
+import type { EnemyKind, HazardKind } from '../engine/types';
+
+export interface WorldDef {
+  index: number; // 1..5
+  id: string;
+  name: string;
+  blurb: string;
+  palette: { sky: string; ground: string; accent: string; moon: string };
+  music: string; // key for Phase 7 audio (not used yet)
+  roster: { kind: Exclude<EnemyKind, 'boss'>; from: number; weight: number }[];
+  hazards: { kind: HazardKind; from: number }[];
+  bossName: string;                 // PLACEHOLDER name; boss design is Phase 7
+  bossGuards: Exclude<EnemyKind, 'boss'>[];
+  challenge: { hp: number; dmg: number };
+}
+
+export const WORLDS: WorldDef[] = [
+  {
+    index: 1, id: 'shadow_village', name: 'Shadow Village',
+    blurb: 'Abandoned temples and moonlit rooftops.',
+    palette: { sky: '#0c0a1c', ground: '#15122a', accent: '#7a2cff', moon: '#cfd6ff' },
+    music: 'village',
+    roster: [
+      { kind: 'melee', from: 1, weight: 5 }, { kind: 'ranged', from: 21, weight: 2 },
+      { kind: 'assassin', from: 31, weight: 2 }, { kind: 'tank', from: 41, weight: 2 },
+      { kind: 'elite', from: 61, weight: 2 },
+    ],
+    hazards: [{ kind: 'spikes', from: 41 }],
+    bossName: 'Temple Warden', bossGuards: ['melee', 'melee'],
+    challenge: { hp: 1.3, dmg: 1.2 },
+  },
+  {
+    index: 2, id: 'crimson_forest', name: 'Crimson Forest',
+    blurb: 'Cursed trees, fog and hidden traps.',
+    palette: { sky: '#1a0709', ground: '#2a0f12', accent: '#d4243d', moon: '#ffb0a0' },
+    music: 'forest',
+    roster: [
+      { kind: 'melee', from: 1, weight: 3 }, { kind: 'ranged', from: 11, weight: 3 },
+      { kind: 'assassin', from: 21, weight: 4 }, { kind: 'tank', from: 31, weight: 2 },
+      { kind: 'elite', from: 61, weight: 2 },
+    ],
+    hazards: [{ kind: 'spikes', from: 21 }],
+    bossName: 'Blood Stag', bossGuards: ['assassin', 'assassin'],
+    challenge: { hp: 1.4, dmg: 1.25 },
+  },
+  {
+    index: 3, id: 'frozen_abyss', name: 'Frozen Abyss',
+    blurb: 'Ice caverns and slippery floors.',
+    palette: { sky: '#07151f', ground: '#0f2a38', accent: '#4cd6ff', moon: '#e8fbff' },
+    music: 'abyss',
+    roster: [
+      { kind: 'melee', from: 1, weight: 3 }, { kind: 'ranged', from: 11, weight: 3 },
+      { kind: 'tank', from: 21, weight: 3 }, { kind: 'assassin', from: 31, weight: 2 },
+      { kind: 'elite', from: 51, weight: 2 },
+    ],
+    hazards: [{ kind: 'ice', from: 11 }, { kind: 'spikes', from: 51 }],
+    bossName: 'Glacier Sovereign', bossGuards: ['ranged', 'tank'],
+    challenge: { hp: 1.5, dmg: 1.3 },
+  },
+  {
+    index: 4, id: 'infernal_fortress', name: 'Infernal Fortress',
+    blurb: 'Lava arenas and elite warriors.',
+    palette: { sky: '#1f0a04', ground: '#33140a', accent: '#ff7a1a', moon: '#ffcf8a' },
+    music: 'fortress',
+    roster: [
+      { kind: 'melee', from: 1, weight: 2 }, { kind: 'ranged', from: 11, weight: 2 },
+      { kind: 'tank', from: 21, weight: 3 }, { kind: 'assassin', from: 31, weight: 2 },
+      { kind: 'elite', from: 41, weight: 4 },
+    ],
+    hazards: [{ kind: 'lava', from: 21 }, { kind: 'spikes', from: 41 }],
+    bossName: 'Magma Tyrant', bossGuards: ['elite', 'tank'],
+    challenge: { hp: 1.7, dmg: 1.35 },
+  },
+  {
+    index: 5, id: 'void_realm', name: 'Void Realm',
+    blurb: 'Surreal dimensions and extreme challenges.',
+    palette: { sky: '#0b0418', ground: '#1c0a33', accent: '#c04bff', moon: '#7ff3ff' },
+    music: 'void',
+    roster: [
+      { kind: 'melee', from: 1, weight: 2 }, { kind: 'ranged', from: 11, weight: 2 },
+      { kind: 'assassin', from: 21, weight: 3 }, { kind: 'tank', from: 31, weight: 2 },
+      { kind: 'elite', from: 41, weight: 4 },
+    ],
+    hazards: [{ kind: 'rift', from: 21 }, { kind: 'lava', from: 41 }, { kind: 'ice', from: 61 }],
+    bossName: 'The Hollow King', bossGuards: ['elite', 'assassin', 'ranged'],
+    challenge: { hp: 2.0, dmg: 1.5 },
+  },
+];
+
+
+========== src/cosmetics/types.ts ==========
+export type Rarity = 'common' | 'rare' | 'epic' | 'legendary';
+export type ItemKind = 'character' | 'weapon';
+
+export const RARITY_ORDER: Rarity[] = ['common', 'rare', 'epic', 'legendary'];
+export const RARITY_COLOR: Record<Rarity, string> = {
+  common: '#9aa3b5', rare: '#4da3ff', epic: '#b66bff', legendary: '#ffb524',
+};
+
+/*
+ * COSMETIC-ONLY RULE: skins describe how something LOOKS. They must never contain
+ * damage, reach, speed, health or any other gameplay number. A test enforces the key list.
+ */
+
+export type CharacterFeature =
+  | 'hood' | 'horns' | 'cape' | 'hat' | 'mask' | 'spikes' | 'halo' | 'scarf' | 'pauldrons' | 'tail';
+
+export interface CharacterVisual {
+  body: string; accent: string; trim: string; eye: string;
+  widthScale: number; heightScale: number; headScale: number; // 0.9..1.1, drawing only
+  features: CharacterFeature[];
+}
+
+export interface CharacterSkin {
+  id: string; name: string; rarity: Rarity; free?: boolean; blurb: string; visual: CharacterVisual;
+}
+
+export type WeaponShape =
+  | 'katana' | 'dual' | 'daggers' | 'spear' | 'scythe' | 'chain' | 'axe' | 'staff' | 'greatsword';
+export type HitFxStyle = 'spark' | 'ring' | 'slash' | 'ember' | 'frost';
+
+export interface WeaponVisual {
+  shape: WeaponShape;
+  length: number;     // drawing length in px (28..56). Does NOT change attack reach.
+  blade: string; handle: string; glow: string;
+  trail: string;      // color of the slash trail
+  hitFx: HitFxStyle; hitColor: string;
+}
+
+export interface WeaponSkin {
+  id: string; name: string; rarity: Rarity; free?: boolean; blurb: string; visual: WeaponVisual;
+}
+
+
+========== src/cosmetics/characters.ts ==========
+import type { CharacterFeature, CharacterSkin, CharacterVisual } from './types';
+
+const look = (
+  body: string, accent: string, trim: string, eye: string, features: CharacterFeature[],
+  widthScale = 1, heightScale = 1, headScale = 1,
+): CharacterVisual => ({ body, accent, trim, eye, features, widthScale, heightScale, headScale });
+
+/** The first entry is the default character. PLACEHOLDER ART: layered shapes, not final artwork. */
+export const CHARACTERS: CharacterSkin[] = [
+  { id: 'shadow_initiate', name: 'Shadow Initiate', rarity: 'common', free: true,
+    blurb: 'A novice of the shadow arts.', visual: look('#2d2350', '#7a2cff', '#bfa3ff', '#d9c8ff', ['hood']) },
+  { id: 'dusk_wanderer', name: 'Dusk Wanderer', rarity: 'common', free: true,
+    blurb: 'Travels roads no map shows.', visual: look('#2b4560', '#8fb4d9', '#d6e6f5', '#ffffff', ['scarf']) },
+
+  { id: 'ash_courier', name: 'Ash Courier', rarity: 'common',
+    blurb: 'Carries messages through burning towns.', visual: look('#4a4a52', '#ff8a3d', '#c9c9d1', '#ffcf8a', ['scarf', 'tail'], 0.95, 1.05) },
+  { id: 'moss_hermit', name: 'Moss Hermit', rarity: 'common',
+    blurb: 'Lives where the temples sank.', visual: look('#2f4a2c', '#9bd36b', '#d7e8b8', '#eaffc0', ['hat'], 1.05, 0.95, 1.1) },
+  { id: 'rust_ronin', name: 'Rust Ronin', rarity: 'common',
+    blurb: 'A masterless blade, long weathered.', visual: look('#5c3a24', '#c97a3a', '#e8c9a0', '#ffd9a8', ['hat', 'scarf']) },
+  { id: 'ink_scribe', name: 'Ink Scribe', rarity: 'common',
+    blurb: 'Writes names that are never spoken.', visual: look('#15151a', '#f2f2f2', '#8a8aa5', '#ffffff', ['mask'], 0.95, 1, 0.95) },
+  { id: 'tide_drifter', name: 'Tide Drifter', rarity: 'common',
+    blurb: 'Washed ashore with a grudge.', visual: look('#1f4d5c', '#37d0c4', '#a8f0ea', '#d4fffb', ['hood', 'tail'], 1, 1.05) },
+
+  { id: 'crimson_fang', name: 'Crimson Fang', rarity: 'rare',
+    blurb: 'Hunts by the scent of fear.', visual: look('#4a0f1a', '#e0334c', '#ff9aa8', '#ffd0d6', ['horns'], 1.05, 1, 1.1) },
+  { id: 'frost_warden', name: 'Frost Warden', rarity: 'rare',
+    blurb: 'Guardian of the frozen gates.', visual: look('#20384d', '#6fd8ff', '#e8fbff', '#ffffff', ['pauldrons', 'hood'], 1.1) },
+  { id: 'jade_sentinel', name: 'Jade Sentinel', rarity: 'rare',
+    blurb: 'Stands watch over forgotten shrines.', visual: look('#0f3d34', '#3fe0a0', '#c8ffe9', '#e8fff6', ['pauldrons', 'hat'], 1.1, 0.95) },
+  { id: 'storm_courier', name: 'Storm Courier', rarity: 'rare',
+    blurb: 'Rides the thunder between worlds.', visual: look('#3a3a1c', '#ffd93d', '#fff2a8', '#ffffff', ['spikes', 'tail'], 0.95, 1.1) },
+  { id: 'bone_oracle', name: 'Bone Oracle', rarity: 'rare',
+    blurb: 'Reads fate in the cracks of old bones.', visual: look('#c9c1ae', '#5b4f3a', '#2a241a', '#ff4d4d', ['mask', 'spikes'], 1, 1, 0.9) },
+  { id: 'twilight_dancer', name: 'Twilight Dancer', rarity: 'rare',
+    blurb: 'Every step is a duel.', visual: look('#4d1a52', '#ff5fd2', '#ffc2f0', '#ffffff', ['cape', 'tail'], 1, 1.05) },
+
+  { id: 'lava_warlord', name: 'Lava Warlord', rarity: 'epic',
+    blurb: 'Forged in the fortress furnaces.', visual: look('#3d1405', '#ff7a1a', '#ffd08a', '#fff0c0', ['horns', 'pauldrons'], 1.1, 1.05, 1.05) },
+  { id: 'void_stalker', name: 'Void Stalker', rarity: 'epic',
+    blurb: 'Steps out of the space between stars.', visual: look('#120826', '#c04bff', '#7ff3ff', '#7ff3ff', ['hood', 'halo'], 0.95, 1.1) },
+  { id: 'obsidian_reaper', name: 'Obsidian Reaper', rarity: 'epic',
+    blurb: 'Collects debts the dead still owe.', visual: look('#0b0b10', '#8a8aa5', '#ff3b5c', '#ff3b5c', ['cape', 'hood'], 1, 1.1) },
+  { id: 'solar_monk', name: 'Solar Monk', rarity: 'epic',
+    blurb: 'Carries a small sun in his palms.', visual: look('#6b4a10', '#ffd24a', '#fff3b8', '#ffffff', ['halo', 'pauldrons'], 1.05, 1, 1.1) },
+
+  { id: 'eclipse_sovereign', name: 'Eclipse Sovereign', rarity: 'legendary',
+    blurb: 'Rules the hour the sun goes dark.', visual: look('#1a1208', '#ffb524', '#fff0b0', '#ffffff', ['halo', 'cape', 'horns'], 1.1, 1.1, 1.05) },
+  { id: 'nightmare_king', name: 'Nightmare King', rarity: 'legendary',
+    blurb: 'Wears the crown of every bad dream.', visual: look('#2a0510', '#b3002a', '#ff6a85', '#ff2d55', ['horns', 'cape', 'spikes'], 1.1, 1.05, 1.1) },
+  { id: 'starlit_empress', name: 'Starlit Empress', rarity: 'legendary',
+    blurb: 'Her cloak is woven from fallen stars.', visual: look('#1c2550', '#9fb8ff', '#ffffff', '#e6f0ff', ['halo', 'cape', 'pauldrons'], 1, 1.1, 1.1) },
+];
+
+
+========== src/cosmetics/weapons.ts ==========
+import type { HitFxStyle, WeaponShape, WeaponSkin, WeaponVisual } from './types';
+
+const gear = (
+  shape: WeaponShape, length: number, blade: string, handle: string, glow: string,
+  trail: string, hitFx: HitFxStyle, hitColor: string,
+): WeaponVisual => ({ shape, length, blade, handle, glow, trail, hitFx, hitColor });
+
+/** The first entry is the default weapon. Glow is layered translucent shapes, not a real blur yet. */
+export const WEAPONS: WeaponSkin[] = [
+  { id: 'initiate_katana', name: 'Initiate Katana', rarity: 'common', free: true,
+    blurb: 'A plain blade with a faint violet shimmer.', visual: gear('katana', 44, '#e6dcff', '#2a2030', '#bfa3ff', '#bfa3ff', 'spark', '#ffffff') },
+  { id: 'rustfang_daggers', name: 'Rustfang Daggers', rarity: 'common', free: true,
+    blurb: 'Old twin knives, still sharp.', visual: gear('daggers', 30, '#cfc7b8', '#4a3a28', '#ffcf8a', '#ffcf8a', 'spark', '#ffe2b0') },
+
+  { id: 'ironbark_spear', name: 'Ironbark Spear', rarity: 'common',
+    blurb: 'Cut from a lightning-struck tree.', visual: gear('spear', 52, '#d0d6dd', '#6b4a2a', '#9aa3b5', '#c9d1da', 'spark', '#ffffff') },
+  { id: 'travelers_axe', name: "Traveler's Axe", rarity: 'common',
+    blurb: 'Splits firewood and enemies alike.', visual: gear('axe', 40, '#b9c0c9', '#5a3d22', '#c9d1da', '#c9d1da', 'spark', '#fff2d0') },
+  { id: 'twin_crescents', name: 'Twin Crescents', rarity: 'common',
+    blurb: 'Paired blades that sing when swung.', visual: gear('dual', 40, '#d9d4f0', '#2a2030', '#9b8cff', '#9b8cff', 'slash', '#d9d4ff') },
+  { id: 'ashen_staff', name: 'Ashen Staff', rarity: 'common',
+    blurb: 'An ember glows in its head.', visual: gear('staff', 48, '#ff9a4d', '#5a4a3a', '#ff9a4d', '#ffb070', 'ember', '#ffcf8a') },
+  { id: 'hunters_chain', name: "Hunter's Chain", rarity: 'common',
+    blurb: 'A weighted chain with a barbed head.', visual: gear('chain', 46, '#c5ccd6', '#3a3f4a', '#9aa3b5', '#aab3c2', 'spark', '#ffffff') },
+
+  { id: 'moonlit_katana', name: 'Moonlit Katana', rarity: 'rare',
+    blurb: 'Its edge holds a sliver of moonlight.', visual: gear('katana', 46, '#bfe1ff', '#1c2a40', '#6fb7ff', '#6fb7ff', 'ring', '#bfe1ff') },
+  { id: 'frostbite_daggers', name: 'Frostbite Daggers', rarity: 'rare',
+    blurb: 'Cold enough to crack the air.', visual: gear('daggers', 32, '#d4f6ff', '#1c3a4a', '#6fd8ff', '#6fd8ff', 'frost', '#e8fbff') },
+  { id: 'jade_lance', name: 'Jade Lance', rarity: 'rare',
+    blurb: 'Carved from a single shrine stone.', visual: gear('spear', 54, '#9bffd4', '#14423a', '#3fe0a0', '#3fe0a0', 'spark', '#c8ffe9') },
+  { id: 'crimson_reaper', name: 'Crimson Reaper', rarity: 'rare',
+    blurb: 'A scythe that remembers every harvest.', visual: gear('scythe', 50, '#ff6a85', '#3a1018', '#ff3b5c', '#ff3b5c', 'slash', '#ff9aa8') },
+  { id: 'stormcaller_staff', name: 'Stormcaller Staff', rarity: 'rare',
+    blurb: 'Crackles before every strike.', visual: gear('staff', 50, '#ffe45c', '#3a3a1c', '#ffd93d', '#fff0a0', 'spark', '#fff6b0') },
+  { id: 'serpent_chain', name: 'Serpent Chain', rarity: 'rare',
+    blurb: 'Coils back to its owner.', visual: gear('chain', 48, '#8cf08a', '#1f3a22', '#4cd964', '#7be87a', 'slash', '#c8ffc6') },
+
+  { id: 'emberblade', name: 'Emberblade', rarity: 'epic',
+    blurb: 'A greatsword still cooling from the forge.', visual: gear('greatsword', 52, '#ffb06a', '#3d1405', '#ff7a1a', '#ff8c3a', 'ember', '#ffd08a') },
+  { id: 'voidtwin_blades', name: 'Voidtwin Blades', rarity: 'epic',
+    blurb: 'Two edges, one hunger.', visual: gear('dual', 44, '#d9a8ff', '#120826', '#c04bff', '#c04bff', 'ring', '#7ff3ff') },
+  { id: 'shadow_scythe', name: 'Shadow Scythe', rarity: 'epic',
+    blurb: 'Cuts the shadow from the body.', visual: gear('scythe', 54, '#b78cff', '#120826', '#7a2cff', '#9a5cff', 'ring', '#d9c8ff') },
+  { id: 'sunsplitter_axe', name: 'Sunsplitter Axe', rarity: 'epic',
+    blurb: 'Gilded edge, blinding swing.', visual: gear('axe', 44, '#ffe08a', '#4a3410', '#ffd24a', '#ffe28a', 'ember', '#fff3b8') },
+
+  { id: 'eclipse_katana', name: 'Eclipse Katana', rarity: 'legendary',
+    blurb: 'A black blade rimmed in golden fire.', visual: gear('katana', 52, '#fff0b0', '#1a1208', '#ffb524', '#ffcf5a', 'slash', '#ffffff') },
+  { id: 'starfall_spear', name: 'Starfall Spear', rarity: 'legendary',
+    blurb: 'Thrown once, it fell as a star.', visual: gear('spear', 56, '#e6f0ff', '#1c2550', '#9fb8ff', '#cfe0ff', 'ring', '#ffffff') },
+  { id: 'soulchain_reaver', name: 'Soulchain Reaver', rarity: 'legendary',
+    blurb: 'Every link holds a captured spirit.', visual: gear('chain', 52, '#ff7be6', '#2a0a2a', '#ff4dd2', '#ff7be6', 'slash', '#ffd0f4') },
+];

@@ -29,12 +29,22 @@ import { PerfGovernor } from '../config/perf';
 import { SHOW_PERF } from '../config/dev';
 import { FrameStats } from '../config/frameStats';
 import { MusicTrack, playMusic, playSfx } from '../audio/audio';
+import { DefeatPanel, PauseMenu, VictoryPanel } from '../ui/ResultOverlays';
+import { Joystick } from '../ui/Joystick';
+import { joystickToInput } from '../ui/controlsLogic';
+import { buzz } from '../ui/haptics';
+import { Panel } from '../ui/Panel'; 
+import { perksFor } from '../skills/progress';
+import { levelFor, xpFromCoins } from '../skills/xp';
+import { combinePerks } from '../engine/perks';
+import { gearPerks } from '../gear/progress';
+import { playerCharacterVisual, playerWeaponVisual } from '../gear/looks';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Arena'>;
 type OneShot = 'light' | 'heavy' | 'jump' | 'dodge' | 'special';
 type Held = 'left' | 'right' | 'block';
 interface Hud { combo: number; wave: number; step: number; boss: string; kinds: string }
-interface Summary { stars: number; score: number; objectiveMet: boolean; reward: RewardBreakdown | null }
+interface Summary { stars: number; score: number; objectiveMet: boolean; reward: RewardBreakdown | null;  xp: number; levelUp: boolean; }
 
 const sameHud = (a: Hud, b: Hud) =>
   a.combo === b.combo && a.wave === b.wave && a.step === b.step && a.boss === b.boss && a.kinds === b.kinds;
@@ -44,7 +54,7 @@ const readHud = (a: Arena): Hud => ({
   boss: bossLabel(a), kinds: a.enemies.map((e) => e.kind).join(','),
 });
 
-function makeArena(cfg: LevelConfig | null, q: Quality): Arena {
+function makeArena(cfg: LevelConfig | null, q: Quality, perks?: ReturnType<typeof perksFor>): Arena {
   const p = PRESETS[q];
   const particles = {
     style: ambientStyleFor(cfg?.world ?? 1), ambient: p.ambient, impactCap: p.impactCap, perHit: p.impactPerHit,
@@ -52,7 +62,7 @@ function makeArena(cfg: LevelConfig | null, q: Quality): Arena {
   if (!cfg) return createArena({ waves: [], tutorial: true, particles });
   return createArena({
     waves: cfg.waves, scaling: cfg.scaling, hazards: cfg.hazards, healPerWave: cfg.healPerWave,
-    world: cfg.world, miniBoss: cfg.miniBoss, particles,
+    world: cfg.world, miniBoss: cfg.miniBoss, particles, perks,
   });
 }
 
@@ -64,10 +74,14 @@ export default function ArenaScreen({ navigation, route }: Props) {
   const params = route.params;
   const { save, recordResult } = useSave();
   const settings = save.settings;
+  const vibrationRef = useRef(settings.vibration);
+  vibrationRef.current = settings.vibration;
+  const jumpHeld = useRef(false);
   const challenge = params.mode === 'level' && !!params.challenge;
 
-  const [character] = useState(() => resolveCharacter(save.inventory.equippedCharacter));
-  const [weapon] = useState(() => resolveWeapon(save.inventory.equippedWeapon));
+  const [character] = useState(() => ({ visual: playerCharacterVisual(save) }));
+  const [weapon] = useState(() => ({ visual: playerWeaponVisual(save) }));
+  const [perks] = useState(() => combinePerks(perksFor(save.hero.ranks), gearPerks(save)));
 
   const cfg = useMemo<LevelConfig | null>(() => {
     if (params.mode !== 'level') return null;
@@ -97,7 +111,7 @@ export default function ArenaScreen({ navigation, route }: Props) {
   const frameStats = useRef(new FrameStats());
   const [perfTxt, setPerfTxt] = useState('');
 
-  const [initial] = useState(() => makeArena(cfg, settings.graphics));
+  const [initial] = useState(() => makeArena(cfg, settings.graphics, perks));
   const arena = useRef<Arena>(initial);
   const input = useRef<Input>(emptyInput());
   const paused = useRef(bossInfo !== null);
@@ -114,8 +128,14 @@ export default function ArenaScreen({ navigation, route }: Props) {
   onOver.current = (a) => {
     if (!cfg) { setResult(a.over); return; }
     const run = evaluateRun(cfg, a);
-    const reward = run.won ? recordResult(cfg, run, challenge) : null;
-    setSummary({ stars: run.stars, score: run.score, objectiveMet: run.objectiveMet, reward });
+    const levelBefore = levelFor(save.hero.xp);
+    const out = recordResult(cfg, run, challenge, a.stats);
+    const reward = run.won ? out : null;
+    const xp = reward ? xpFromCoins(reward.total) : 0;
+    setSummary({
+      stars: run.stars, score: run.score, objectiveMet: run.objectiveMet, reward,
+      xp, levelUp: levelFor(save.hero.xp + xp) > levelBefore,
+    });
     setResult(a.over);
   };
 
@@ -171,7 +191,7 @@ export default function ArenaScreen({ navigation, route }: Props) {
     }
 
     if (a.events.length > 0) {
-      for (const ev of a.events) playSfx(ev);
+      for (const ev of a.events) { playSfx(ev); if (vibrationRef.current) buzz(ev); }
       a.events.length = 0;
     }
 
@@ -218,7 +238,7 @@ export default function ArenaScreen({ navigation, route }: Props) {
   const startFight = () => { paused.current = false; setIntro(false); };
 
   const retry = () => {
-    arena.current = makeArena(cfg, qualityRef.current);
+    arena.current = makeArena(cfg, qualityRef.current, perks);
     input.current = emptyInput();
     shown.current = false;
     paused.current = false;
@@ -234,6 +254,14 @@ export default function ArenaScreen({ navigation, route }: Props) {
     onPressOut: () => { input.current[k] = false; },
   });
   const tap = (k: OneShot) => ({ onPressIn: () => { input.current[k] = true; } });
+
+  const onStick = (dx: number, dy: number) => {
+    const r = joystickToInput(dx, dy, jumpHeld.current);
+    jumpHeld.current = r.jumpHeld;
+    const i = input.current;
+    i.left = r.left; i.right = r.right; i.block = r.block;
+    if (r.jump) i.jump = true;
+  };
 
   const togglePause = () => {
     if (intro) return;
@@ -293,12 +321,16 @@ export default function ArenaScreen({ navigation, route }: Props) {
           <Points points={hurtPts} mode="points" color="#ff4d5e" style="stroke"
                   strokeWidth={3} strokeCap="square" />
 
-          <Rect x={20} y={14} width={200} height={10} color="#222" />
-          <Rect x={20} y={14} width={pHpW} height={10} color="#4cd964" />
-          <Rect x={20} y={28} width={120} height={6} color="#222" />
-          <Rect x={20} y={28} width={enW} height={6} color={enColor} />
-          <Rect x={580} y={14} width={200} height={10} color="#222" />
-          <Rect x={580} y={14} width={eHpW} height={10} color="#e0334c" />
+          <Circle cx={24} cy={26} r={17} color={character.visual.body} />
+          <Circle cx={24} cy={26} r={17} color={character.visual.accent} style="stroke" strokeWidth={2} />
+          <Rect x={48} y={14} width={200} height={10} color="#222" />
+          <Rect x={48} y={14} width={pHpW} height={10} color="#4cd964" />
+          <Rect x={48} y={28} width={120} height={6} color="#222" />
+          <Rect x={48} y={28} width={enW} height={6} color={enColor} />
+          <Circle cx={776} cy={26} r={17} color="#b3263e" />
+          <Circle cx={776} cy={26} r={17} color="#ff8a9a" style="stroke" strokeWidth={2} />
+          <Rect x={552} y={14} width={200} height={10} color="#222" />
+          <Rect x={552} y={14} width={eHpW} height={10} color="#e0334c" />
           <Rect x={260} y={42} width={280} height={8} color="#222" opacity={bossOn} />
           <Rect x={260} y={42} width={bossW} height={8} color="#ff8c1a" opacity={bossOn} />
         </Group>
@@ -322,10 +354,21 @@ export default function ArenaScreen({ navigation, route }: Props) {
 
       {SHOW_PERF && !!perfTxt && <Text style={styles.perf}>{perfTxt}</Text>}
 
-      <View style={[styles.cluster, { left: 24, flexDirection: 'row' }]}>
-        <Btn label="◀" size={64 * cs} {...hold('left')} />
-        <Btn label="▶" size={64 * cs} {...hold('right')} />
-      </View>
+            {settings.controls === 'joystick' ? (
+        <View style={[styles.cluster, { left: 24 }]}>
+          <Joystick size={Math.round(124 * cs)} onChange={onStick} />
+        </View>
+      ) : (
+        <View style={[styles.cluster, { left: 24, flexDirection: 'row' }]}>
+          <Btn label="◀" size={64 * cs} {...hold('left')} />
+          <Btn label="▶" size={64 * cs} {...hold('right')} />
+        </View>
+      )}
+      {cfg && (
+        <View style={[styles.badge, { left: width / 2 + 38 }]}>
+          <Text style={styles.badgeTxt}>{cfg.level}</Text>
+        </View>
+      )}
       <View style={[styles.cluster, { right: 24 }]}>
         <View style={styles.row}>
           <Btn label="BLOCK" size={54 * cs} {...hold('block')} />
@@ -356,45 +399,33 @@ export default function ArenaScreen({ navigation, route }: Props) {
         </Pressable>
       )}
 
-      {(result || isPaused) && (
-        <View style={styles.overlay}>
-          <Text style={styles.overTitle}>{title}</Text>
-          {summary && result === 'victory' && (
-            <View style={styles.summary}>
-              <Text style={styles.stars}>{'★'.repeat(summary.stars)}{'☆'.repeat(3 - summary.stars)}</Text>
-              <Text style={styles.sumTxt}>Score {summary.score} · Objective {summary.objectiveMet ? 'met' : 'missed'}</Text>
-              {r && (
-                <Text style={styles.coinTxt}>
-                  +{r.total} ●{' '}
-                  {[
-                    r.firstClear ? `clear ${r.firstClear}` : '',
-                    r.starBonus ? `stars ${r.starBonus}` : '',
-                    r.replay ? `replay ${r.replay}` : '',
-                    r.challenge ? `challenge ${r.challenge}` : '',
-                  ].filter(Boolean).join(' · ')}
-                </Text>
-              )}
-            </View>
-          )}
-          <View style={styles.menuRow}>
-            {canNext && nextTarget && (
-              <Pressable
-                style={styles.menuBtn}
-                onPress={() => navigation.replace('Arena', { mode: 'level', world: nextTarget.world, level: nextTarget.level })}
-              >
-                <Text style={styles.menuTxt}>NEXT</Text>
-              </Pressable>
-            )}
-            {result ? (
-              <Pressable style={styles.menuBtn} onPress={retry}><Text style={styles.menuTxt}>RETRY</Text></Pressable>
-            ) : (
-              <Pressable style={styles.menuBtn} onPress={togglePause}><Text style={styles.menuTxt}>RESUME</Text></Pressable>
-            )}
-            <Pressable style={styles.menuBtn} onPress={() => navigation.goBack()}>
-              <Text style={styles.menuTxt}>{cfg ? 'LEVELS' : 'HOME'}</Text>
-            </Pressable>
-          </View>
-        </View>
+            {isPaused && !result && (
+        <PauseMenu
+          onResume={togglePause}
+          onRestart={retry}
+          onSettings={() => navigation.navigate('Settings')}
+          onMenu={() => navigation.navigate('Home')}
+        />
+      )}
+      {result === 'victory' && (
+        <VictoryPanel
+          title={title}
+          stars={summary?.stars}
+          score={summary?.score}
+          objectiveMet={summary?.objectiveMet}
+          reward={summary?.reward ?? null}
+          onNext={canNext && nextTarget
+            ? () => navigation.replace('Arena', { mode: 'level', world: nextTarget.world, level: nextTarget.level })
+            : undefined}
+          onRetry={retry}
+          onExit={() => navigation.goBack()}
+          exitLabel={cfg ? 'LEVELS' : 'HOME'}
+          xp={summary?.xp}
+          levelUp={summary?.levelUp}
+        />
+      )}
+      {result === 'defeat' && (
+        <DefeatPanel onRetry={retry} onExit={() => navigation.goBack()} exitLabel={cfg ? 'LEVELS' : 'HOME'} />
       )}
     </View>
   );
@@ -449,4 +480,6 @@ const styles = StyleSheet.create({
   menuBtn: { backgroundColor: '#7a2cff', paddingHorizontal: 30, paddingVertical: 10, borderRadius: 8 },
   menuTxt: { color: '#fff', fontWeight: '800', letterSpacing: 3 },
   perf: { position: 'absolute', top: 70, left: 24, color: '#7fff9f', fontSize: 10, fontWeight: '700' },
+  badge: { position: 'absolute', top: 6, width: 30, height: 30, borderRadius: 15, backgroundColor: '#f5a623', alignItems: 'center', justifyContent: 'center' },
+  badgeTxt: { color: '#1b1206', fontWeight: '900', fontSize: 12 },
 });

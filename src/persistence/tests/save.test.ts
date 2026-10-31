@@ -13,7 +13,7 @@ describe('migration and sanitising', () => {
   it('upgrades a Phase 5 save: keeps progress and coins, adds the free items', () => {
     const old = { version: 1, coins: 77, levels: { [levelId(1, 1)]: { completed: true, stars: 2, bestScore: 10, challengeClears: 0 } } };
     const s = sanitizeSave(old);
-    expect(s.version).toBe(3);
+    expect(s.version).toBe(4);
     expect(s.coins).toBe(77);
     expect(s.levels[levelId(1, 1)].stars).toBe(2);
     expect(s.inventory).toEqual(defaultSave().inventory);

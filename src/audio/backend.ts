@@ -43,6 +43,9 @@ export function createBackend(make: PlayerFactory, cfg: BackendConfig): Backend 
   const gap = cfg.minGapMs ?? 40;
   const now = cfg.now ?? Date.now;
   const onError = cfg.onError ?? ((m, e) => console.warn(`audio: ${m}`, e));
+  let sfxMaster = 1;
+  let musicMaster = 1;
+
 
   const pools = new Map<SfxName, Pool>();
   for (const name of Object.keys(cfg.sfx) as SfxName[]) {
@@ -79,7 +82,9 @@ export function createBackend(make: PlayerFactory, cfg: BackendConfig): Backend 
       const p = pool.players[pool.next];
       pool.next = (pool.next + 1) % pool.players.length;
       safe(() => p.seekTo(0), onError, `rewind ${name}`);
+      safe(() => { p.volume = (cfg.sfxVolume[name] ?? 0.7) * sfxMaster; }, onError, `volume ${name}`);
       safe(() => p.play(), onError, `play ${name}`);
+      
     },
 
     playMusic(track) {
@@ -90,7 +95,7 @@ export function createBackend(make: PlayerFactory, cfg: BackendConfig): Backend 
       try {
         const player = make(source);
         player.loop = true;
-        player.volume = cfg.musicVolume;
+        player.volume = cfg.musicVolume * musicMaster;
         music = { track, player };
         safe(() => player.play(), onError, `play music ${track}`);
       } catch (e) {
@@ -100,6 +105,15 @@ export function createBackend(make: PlayerFactory, cfg: BackendConfig): Backend 
     },
 
     stopMusic,
+
+    setVolumes(sfx, musicV) {
+      sfxMaster = Math.min(1, Math.max(0, sfx));
+      musicMaster = Math.min(1, Math.max(0, musicV));
+      if (music) {
+        const m = music;
+        safe(() => { m.player.volume = cfg.musicVolume * musicMaster; }, onError, 'music volume');
+      }
+    },
 
     dispose() {
       stopMusic();

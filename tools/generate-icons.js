@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { encodePng, renderRgba } = require('./Icons');
+   const { encodePng, renderRgba } = require('./icons');
 
 const dir = path.join(__dirname, '..', 'assets');
 fs.mkdirSync(dir, { recursive: true });

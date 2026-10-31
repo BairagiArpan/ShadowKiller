@@ -62,7 +62,9 @@ export function rectsOverlap(a: Rect, b: Rect): boolean {
 export interface HitOptions {
   armored?: boolean;     // light hits do damage but do not stagger
   unblockable?: boolean; // ignores block (special ability)
-  invuln?: number;       // i-frames granted to the target
+  invuln?: number; 
+  blockReduction?: number;  // overrides the default block reduction (skills)      // i-frames granted to the target
+  damageMul?: number; // scales the damage dealt (for example gear defense on the player)
 }
 
 /** Applies damage, knockback, block, armor and i-frame rules. Mutates `target`. */
@@ -71,17 +73,18 @@ export function applyHit(
   opts: HitOptions = {},
 ): HitResult {
   if (target.invuln > 0 || target.state === 'dead') return 'ignored';
+  const dealt = damage * (opts.damageMul ?? 1);
   const dir = target.x >= attackerX ? 1 : -1; // push away from attacker
   const facingAttacker = target.facing === -dir;
 
   if (target.state === 'block' && facingAttacker && !opts.unblockable) {
-    target.hp = Math.max(0, target.hp - damage * (1 - BLOCK_REDUCTION));
+    target.hp = Math.max(0, target.hp - dealt * (1 - (opts.blockReduction ?? BLOCK_REDUCTION)));
     target.vx = dir * knockback * 0.3;
     target.invuln = 0.15;
     return 'blocked';
   }
 
-  target.hp = Math.max(0, target.hp - damage);
+  target.hp = Math.max(0, target.hp - dealt);
   target.invuln = opts.invuln ?? HIT_INVULN;
 
   if (target.hp <= 0) {

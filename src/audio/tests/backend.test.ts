@@ -105,3 +105,17 @@ describe('music', () => {
     expect(players.every((p) => p.released)).toBe(true);
   });
 });
+
+describe('master volume', () => {
+  it('scales effects when played and the running music immediately', () => {
+    const { backend, sfxPlayers, players } = setup();
+    backend.setVolumes!(0.5, 0.5);
+    backend.playSfx('hit_heavy');
+    expect(sfxPlayers('hit_heavy')[0].volume).toBeCloseTo(0.4);
+    backend.playMusic('menu');
+    const m = players.find((p) => p.source === 'music:menu')!;
+    expect(m.volume).toBeCloseTo(0.2);
+    backend.setVolumes!(1, 0);
+    expect(m.volume).toBe(0);
+  });
+});

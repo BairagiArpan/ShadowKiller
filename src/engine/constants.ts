@@ -24,6 +24,7 @@ export const BUFFER_TIME = 0.18; // input buffer window (seconds)
 export const COMBO_WINDOW = 2.0;
 export const MAX_COMBO_STACKS = 10;
 export const COMBO_BONUS_PER_HIT = 0.03;
+export const DODGE_COOLDOWN = 0.6; // seconds from the start of one dodge to the earliest next one (0 = no limit)
 
 export const PLAYER_MAX_HP = 100;
 export const MAX_ENERGY = 100;
@@ -32,6 +33,7 @@ export const SPECIAL = { windup: 0.15, duration: 0.5, radius: 150, damage: 30, k
 export const ENERGY_ON_BLOCK = 4;
 export const ENERGY_GAIN: Record<AttackKind | 'special', number> = {
   light1: 6, light2: 6, light3: 10, heavy: 12, special: 0,
+  
 };
 
 export const ENEMY_BLOCK_TIME = 0.5;

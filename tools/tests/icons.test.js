@@ -1,5 +1,5 @@
 const zlib = require('zlib');
-const { crc32, encodePng, renderRgba } = require('../Icons');
+const { crc32, encodePng, renderRgba } = require('../icons');
 
 function chunks(png) {
   const out = [];

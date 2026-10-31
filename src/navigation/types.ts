@@ -11,4 +11,8 @@ export type RootStackParamList = {
   Characters: undefined;
   Weapons: undefined;
   Settings: undefined;
+  Daily: undefined;
+  Progress: undefined;
+  Skills: undefined;
+  Gear: undefined;
 };

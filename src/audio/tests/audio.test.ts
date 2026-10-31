@@ -15,6 +15,18 @@ function fake() {
 
 describe('audio routing', () => {
 
+    it('passes master volumes to the backend, including one that arrives later', () => {
+    const calls: string[] = [];
+    configureAudio({ sound: true, music: true, soundVolume: 0.5, musicVolume: 0.25 });
+    setAudioBackend({
+      playSfx() {}, playMusic() {}, stopMusic() {},
+      setVolumes: (s, m) => { calls.push(`${s}/${m}`); },
+    });
+    expect(calls).toEqual(['0.5/0.25']);
+    configureAudio({ sound: true, music: true, soundVolume: 2 });
+    expect(calls[calls.length - 1]).toBe('1/0.25');
+  });
+
     it('starts music requested before the backend existed once the backend arrives', () => {
     playMusic('menu');
     const { b, log } = fake();
